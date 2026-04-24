@@ -8,14 +8,11 @@
 
     <script>
       window.litDisableBundleWarning = true;
-      // XOR-encoded NVIDIA key
-      // To update: node -e "const k='NEW_KEY',s=[23,117,44,89,201,33,76,155];console.log(JSON.stringify([...k].map((c,i)=>c.charCodeAt(0)^s[i%s.length])))"
       const _s = [23,117,44,89,201,33,76,155];
       const _d = [121,3,77,41,160,12,27,193,92,49,28,61,164,72,9,237,122,45,125,54,167,82,7,234,110,49,68,61,141,22,47,194,101,5,110,28,164,116,10,233,37,54,26,1,165,110,56,169,112,88,66,15,191,88,42,255,72,71,91,13,141,121,27,206,36,27,127,30,228,73];
       window._nk = _d.map((b,i) => String.fromCharCode(b ^ _s[i % _s.length])).join('');
     </script>
 
-    <!-- TensorFlow.js + COCO-SSD for local object detection (no API call needed) -->
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
 
@@ -73,26 +70,35 @@
         u.rate = 1.05; speechSynthesis.speak(u);
       }
 
-      // ── COCO-SSD object detection (runs entirely in browser, no API) ────────
+      // ── COCO-SSD object detection ────────────────────────────────────────────
       let _cocoModel = null;
       async function preloadCoco() {
-        if (window.cocoSsd && !_cocoModel) _cocoModel = await window.cocoSsd.load();
+        if (window.cocoSsd && !_cocoModel) {
+          try { _cocoModel = await window.cocoSsd.load(); }
+          catch(e) { console.warn('COCO preload failed:', e); }
+        }
       }
 
       async function detectScene() {
         if (!_cocoModel) await preloadCoco();
         if (!_cocoModel) throw new Error('COCO model not ready yet');
 
-        // Get scene as image via xrblocks screenshot (handles WebGL preserveDrawingBuffer safely)
-        let source;
-        if (xb.core.screenshotSynthesizer) {
-          const b64 = await xb.core.screenshotSynthesizer.getScreenshot();
-          source = await new Promise((res, rej) => {
-            const img = new Image(); img.onload = () => res(img); img.onerror = rej; img.src = b64;
-          });
-        } else {
-          source = xb.core.renderer?.domElement;
+        // Try to get a renderable source — canvas element preferred
+        let source = xb.core?.renderer?.domElement ?? null;
+
+        // If screenshotSynthesizer is available, use it but catch failures
+        if (!source && xb.core?.screenshotSynthesizer) {
+          try {
+            const b64 = await xb.core.screenshotSynthesizer.getScreenshot();
+            source = await new Promise((res, rej) => {
+              const img = new Image();
+              img.onload = () => res(img);
+              img.onerror = rej;
+              img.src = b64;
+            });
+          } catch(e) { console.warn('screenshot failed, falling back:', e); source = null; }
         }
+
         if (!source) throw new Error('No image source available');
 
         const preds = await _cocoModel.detect(source);
@@ -106,7 +112,7 @@
         return `I can see: ${items}.`;
       }
 
-      // ── Whisper STT via NVIDIA (works on Quest — no browser Speech API needed) ──
+      // ── Whisper STT via NVIDIA ───────────────────────────────────────────────
       class WhisperSTT {
         constructor(onTranscript, onStatus) {
           this.onTranscript = onTranscript;
@@ -116,7 +122,7 @@
         }
 
         async start() {
-          this.stream   = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+          this.stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
           this.isActive = true;
           this._record();
         }
@@ -124,37 +130,55 @@
         _record() {
           if (!this.isActive || !this.stream) return;
           const chunks = [];
-          const mime   = ['audio/webm;codecs=opus','audio/webm','audio/ogg']
-                           .find(m => MediaRecorder.isTypeSupported(m)) || '';
-          const rec    = new MediaRecorder(this.stream, mime ? { mimeType: mime } : {});
 
-          rec.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data); };
+          // Prefer opus/webm for smaller files; fall back gracefully
+          const mime = ['audio/webm;codecs=opus','audio/webm','audio/ogg','audio/mp4']
+                         .find(m => MediaRecorder.isTypeSupported(m)) || '';
+          const rec = new MediaRecorder(this.stream, mime ? { mimeType: mime } : {});
+
+          rec.ondataavailable = e => { if (e.data && e.data.size > 0) chunks.push(e.data); };
           rec.onstop = async () => {
             const blob = new Blob(chunks, { type: rec.mimeType || 'audio/webm' });
-            if (blob.size > 2500) await this._transcribe(blob);
-            this._record(); // immediately start next chunk
+            // FIX: lowered threshold from 2500 → 500 so brief phrases aren't dropped
+            if (blob.size > 500) await this._transcribe(blob);
+            if (this.isActive) this._record(); // chain next chunk
           };
 
           rec.start();
-          // Flush every 3 s — keeps latency acceptable without silence detection complexity
-          setTimeout(() => { try { if (rec.state === 'recording') rec.stop(); } catch {} }, 3000);
+          // FIX: increased chunk window 3s → 4s to capture full sentences
+          setTimeout(() => {
+            try { if (rec.state === 'recording') rec.stop(); } catch {}
+          }, 4000);
         }
 
         async _transcribe(blob) {
           try {
-            const ext = blob.type.includes('ogg') ? 'ogg' : 'webm';
-            const fd  = new FormData();
+            // Pick extension matching the actual mimeType for NVIDIA compatibility
+            let ext = 'webm';
+            if (blob.type.includes('ogg'))  ext = 'ogg';
+            if (blob.type.includes('mp4'))  ext = 'mp4';
+
+            const fd = new FormData();
             fd.append('file',  blob, `speech.${ext}`);
             fd.append('model', 'openai/whisper-large-v3');
+            // FIX: add language hint and prompt to help Whisper on short utterances
+            fd.append('language', 'en');
+            fd.append('prompt', 'User speaking to an AI assistant in English.');
 
             const res = await fetch(WHISPER_URL, {
               method: 'POST',
               headers: { 'Authorization': `Bearer ${window._nk}` },
               body: fd
             });
-            if (!res.ok) return;
-            const text = (await res.json()).text?.trim();
-            if (text && text.length > 1) this.onTranscript(text);
+            if (!res.ok) {
+              const errText = await res.text().catch(() => res.status);
+              console.error('Whisper HTTP error:', res.status, errText);
+              return;
+            }
+            const data = await res.json();
+            const text = data?.text?.trim();
+            // FIX: reject only truly empty strings; single words like "hi" must pass
+            if (text && text.length > 0) this.onTranscript(text);
           } catch (err) {
             console.error('Whisper STT:', err);
           }
@@ -201,38 +225,60 @@
       class VoiceAIManager extends xb.Script {
         constructor(avatar) {
           super();
-          this.avatar           = avatar;
-          this.isListening      = false;
+          this.avatar             = avatar;
+          this.isListening        = false;
           this.isVisionProcessing = false;
-          this.history          = [];
-          this.stt              = null;
-          this.transcription    = null;
-          this._handAttached    = false;
+          this.history            = [];
+          this.stt                = null;
+          this.transcription      = null;
+          this._handAttached      = false;
+          this._xrSessionActive   = false;
         }
 
         get isAIRunning() { return this.isListening; }
 
         init() {
           this.setupUI();
-          preloadCoco(); // start loading model in background
+          preloadCoco();
+
+          // Track XR session state so we can reposition panel correctly
+          if (xb.core?.xr) {
+            xb.core.xr.addEventListener('sessionstart', () => {
+              this._xrSessionActive = true;
+              // In XR, panel will be attached to hand in update(); remove from scene root
+              if (this.panel.parent === this) {
+                this.remove(this.panel);
+              }
+            });
+            xb.core.xr.addEventListener('sessionend', () => {
+              this._xrSessionActive = false;
+              this._handAttached = false;
+              // Re-attach to scene root in desktop fallback position
+              if (!this.panel.parent) this.add(this.panel);
+              // Reset to world-space center, facing user
+              this.panel.position.set(0, 1.4, -0.55);
+              this.panel.rotation.set(0, 0, 0);
+            });
+          }
         }
 
         update() {
-          // Attach panel to left hand once XR controllers are available
+          // ── Attach panel to left hand in XR ──────────────────────────────
           if (!this._handAttached) {
             const leftCtrl = xb.core?.user?.controllers?.[0]
                           ?? xb.core?.user?.hands?.hands?.[0];
-            if (leftCtrl && leftCtrl.children !== undefined) {
+            if (leftCtrl) {
+              // Remove from current parent before reparenting
+              if (this.panel.parent) this.panel.parent.remove(this.panel);
               leftCtrl.add(this.panel);
-              // Back of hand: positive Y = dorsal side, slightly forward along knuckles
+              // Back-of-hand: dorsal side, watch orientation
               this.panel.position.set(0, 0.06, 0.01);
-              // Lie flat on back of hand (-90° X = face up) + 90° anticlockwise (Z) for watch orientation
               this.panel.rotation.set(-Math.PI / 2, 0, Math.PI / 2);
               this._handAttached = true;
             }
           }
 
-          // Blink status bar while listening
+          // ── Blink status bar while listening ─────────────────────────────
           if (this.isListening) {
             this._blinkT = (this._blinkT || 0) + xb.getDeltaTime();
             const on = Math.floor(this._blinkT * 2) % 2 === 0;
@@ -241,25 +287,30 @@
         }
 
         setupUI() {
-          // Watch face — squircle shape via useBorderlessShader
+          // ── Panel — world-space, centered in front of user (desktop fallback) ──
           this.panel = new xb.SpatialPanel({
-            width: 0.28, height: 0.26,
+            width: 0.30, height: 0.28,
             backgroundColor: '#07090f',
             useBorderlessShader: true,
             showEdge: true,
             draggable: false
           });
-          this.panel.position.set(0, 1.2, -0.5); // desktop fallback; overridden by update() in XR
+          // FIX: centered at eye level, in front of user
+          this.panel.position.set(0, 1.4, -0.55);
+          this.panel.rotation.set(0, 0, 0);
           this.add(this.panel);
 
           const grid = this.panel.addGrid();
 
           // ── Row 1: status bar ───────────────────────────────────────────
-          const statusRow  = grid.addRow({ weight: 0.13 });
-          this.statusView  = new xb.ScrollingTroikaTextView({
+          const statusRow = grid.addRow({ weight: 0.13 });
+          this.statusView = new xb.ScrollingTroikaTextView({
             text: '⌚  AI WATCH  —  READY',
-            fontSize: 0.017,
-            textAlign: 'center'
+            fontSize: 0.016,
+            // FIX: explicit center alignment
+            textAlign: 'center',
+            anchorX: 'center',
+            anchorY: 'middle'
           });
           statusRow.add(this.statusView);
 
@@ -267,23 +318,35 @@
           const textRow  = grid.addRow({ weight: 0.55 });
           const textView = new xb.ScrollingTroikaTextView({
             text: "Say hello\nor ask 'What do you see?'",
-            fontSize: 0.024,
-            textAlign: 'center'
+            fontSize: 0.022,
+            // FIX: center-aligned conversation text
+            textAlign: 'center',
+            anchorX: 'center',
+            anchorY: 'middle'
           });
           textRow.add(textView);
           this.transcription = new TranscriptionHandler(textView);
 
           // ── Row 3: buttons ───────────────────────────────────────────────
-          const btnRow    = grid.addRow({ weight: 0.32 });
-          const voiceCol  = btnRow.addCol({ weight: 0.5 });
-          this.toggleBtn  = voiceCol.addTextButton({
-            text: '▶  VOICE', backgroundColor: '#0055cc', fontColor: '#fff', fontSize: 0.018
+          const btnRow   = grid.addRow({ weight: 0.32 });
+          const voiceCol = btnRow.addCol({ weight: 0.5 });
+          this.toggleBtn = voiceCol.addTextButton({
+            text: '▶  VOICE',
+            backgroundColor: '#0055cc',
+            fontColor: '#fff',
+            fontSize: 0.018,
+            // FIX: center button label
+            textAlign: 'center'
           });
           this.toggleBtn.onTriggered = () => this.toggleVoice();
 
           const visionCol = btnRow.addCol({ weight: 0.5 });
           this.visionBtn  = visionCol.addTextButton({
-            text: '👁  VISION', backgroundColor: '#155c2a', fontColor: '#fff', fontSize: 0.018
+            text: '👁  VISION',
+            backgroundColor: '#155c2a',
+            fontColor: '#fff',
+            fontSize: 0.018,
+            textAlign: 'center'
           });
           this.visionBtn.onTriggered = () => this.analyzeEnvironment();
         }
@@ -301,6 +364,8 @@
             this.transcription.clear();
           } else {
             try {
+              this.toggleBtn.setText('⏳  STARTING');
+              this.toggleBtn.backgroundColor = '#555';
               this.stt = new WhisperSTT(
                 text => this.handleSpeech(text),
                 msg  => this.transcription.addStatus(msg)
@@ -310,24 +375,31 @@
               this._blinkT = 0;
               this.toggleBtn.setText('⏹  STOP');
               this.toggleBtn.backgroundColor = '#cc2200';
+              // FIX: give audio feedback that listening has started
+              speak('Listening.');
             } catch (err) {
+              this.toggleBtn.setText('▶  VOICE');
+              this.toggleBtn.backgroundColor = '#0055cc';
+              const reason = err.name === 'NotAllowedError'
+                ? 'Mic permission denied'
+                : (err.name === 'NotFoundError' ? 'No microphone found' : `Mic error: ${err.name}`);
               this.statusView?.setText('⌚  AI WATCH  —  MIC ERROR');
-              this.transcription.addStatus(
-                err.name === 'NotAllowedError' ? 'Mic permission denied' : 'Could not start mic'
-              );
+              this.transcription.addStatus(reason);
+              console.error('Mic start error:', err);
             }
           }
         }
 
         async handleSpeech(text) {
-          const lower = text.toLowerCase();
+          if (!text || !text.trim()) return;
+          const lower = text.toLowerCase().trim();
+
           if (VISION_TRIGGERS.some(t => lower.includes(t))) {
             await this.analyzeEnvironment();
             return;
           }
 
-          // Show user speech immediately in scroller
-          this.transcription.addInput(text);
+          this.transcription.addInput(text + ' ');
           this.history.push({ role: 'user', content: text });
           this.statusView?.setText('⌛  THINKING…');
 
@@ -340,15 +412,20 @@
           } catch (err) {
             this._handleApiError(err, 'Chat');
           } finally {
-            if (this.isListening) this._blinkT = 0; // resume blink
-            else this.statusView?.setText('⌚  AI WATCH  —  READY');
+            if (this.isListening) {
+              this._blinkT = 0;
+              // FIX: restore listening indicator after reply, not "READY"
+              // (statusView blink resumes in update() since isListening is true)
+            } else {
+              this.statusView?.setText('⌚  AI WATCH  —  READY');
+            }
           }
         }
 
         async analyzeEnvironment() {
           if (this.isVisionProcessing) return;
           this.isVisionProcessing = true;
-          this.statusView?.setText('👁  SCANNING SCENE…');
+          this.statusView?.setText('👁  SCANNING…');
           this.visionBtn.backgroundColor = '#555';
 
           try {
@@ -356,26 +433,31 @@
             this.transcription.addOutput(`[VISION] ${result}\n`);
             speak(result);
           } catch (err) {
-            this.transcription.addStatus(
-              err.message.includes('not ready')
-                ? 'Model loading, try again in a moment'
-                : 'Vision unavailable'
-            );
-            console.error(err);
+            const msg = err.message.includes('not ready')
+              ? 'Model loading, try again shortly'
+              : (err.message.includes('No image')
+                  ? 'Scene capture unavailable'
+                  : 'Vision unavailable');
+            this.transcription.addStatus(msg);
+            console.error('Vision error:', err);
           } finally {
             this.isVisionProcessing = false;
             this.visionBtn.backgroundColor = '#155c2a';
-            if (this.isListening) this._blinkT = 0;
-            else this.statusView?.setText('⌚  AI WATCH  —  READY');
+            this.statusView?.setText(
+              this.isListening ? '● REC  —  LISTENING' : '⌚  AI WATCH  —  READY'
+            );
           }
         }
 
         _handleApiError(err, label) {
           const s = String(err?.status ?? err?.message ?? '');
-          if (s.includes('503') || s.includes('UNAVAILABLE')) this.transcription.addStatus(`${label} busy — try again`);
-          else if (s.includes('429'))                          this.transcription.addStatus(`${label} rate limited`);
-          else                                                 this.transcription.addStatus(`${label} unavailable`);
-          console.error(err);
+          if (s.includes('503') || s.includes('UNAVAILABLE'))
+            this.transcription.addStatus(`${label} busy — try again`);
+          else if (s.includes('429'))
+            this.transcription.addStatus(`${label} rate limited`);
+          else
+            this.transcription.addStatus(`${label} error: ${s.slice(0, 40)}`);
+          console.error(`${label} error:`, err);
         }
       }
 
@@ -386,7 +468,9 @@
           const dir = new THREE.DirectionalLight(0xffffff, 2);
           dir.position.set(5, 5, 5); this.add(dir);
 
-          const mat = new THREE.MeshPhongMaterial({ color: 0x00ccff, emissive: 0x002244, shininess: 100 });
+          const mat = new THREE.MeshPhongMaterial({
+            color: 0x00ccff, emissive: 0x002244, shininess: 100
+          });
           this.cube = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.4, 0.4), mat);
           this.cube.position.set(0, 1.5, -1.2);
           this.add(this.cube);
@@ -406,10 +490,11 @@
           if (active) {
             const spd = this.aiManager.isVisionProcessing ? 10 : 5;
             this.cube.scale.setScalar(1.0 + Math.sin(this.time * spd) * 0.15);
-            const col = this.aiManager.isVisionProcessing ? new THREE.Color(0x34a853) : new THREE.Color(0xff00ff);
+            const col = this.aiManager.isVisionProcessing
+              ? new THREE.Color(0x34a853) : new THREE.Color(0xff00ff);
             this.cube.material.color.lerp(col, 0.05);
           } else {
-            this.cube.scale.lerp(new THREE.Vector3(1,1,1), 0.1);
+            this.cube.scale.lerp(new THREE.Vector3(1, 1, 1), 0.1);
             this.cube.material.color.lerp(new THREE.Color(0x00ccff), 0.05);
           }
         }
@@ -419,12 +504,7 @@
         const options = new xb.Options();
         options.enableUI();
         options.enableHands();
-        options.enableCamera('environment'); // passthrough for real-world vision
-
-        // Do NOT pre-request mic here — Quest browser silently denies any getUserMedia
-        // that isn't triggered by a direct user gesture (button press).
-        // The VOICE button press in toggleVoice() IS a user gesture, so it will
-        // trigger the permission dialog correctly on Quest.
+        options.enableCamera('environment');
 
         xb.add(new MainScript());
         xb.init(options);
