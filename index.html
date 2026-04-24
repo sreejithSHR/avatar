@@ -34,7 +34,7 @@
       import { GeminiManager as CoreGeminiManager } from 'xrblocks/addons/ai/GeminiManager.js';
       import 'xrblocks/addons/simulator/SimulatorAddons.js';
 
-      // XOR-encoded — not plaintext in source, auto-decodes at runtime
+      // XOR-encoded key — replace _d with values from: node -e "const k='YOUR_NEW_KEY',s=[23,117,44,89,201,33,76,155];console.log(JSON.stringify([...k].map((c,i)=>c.charCodeAt(0)^s[i%s.length])))"
       const _s = [23,117,44,89,201,33,76,155];
       const _d = [86,60,86,56,154,88,14,162,125,18,73,29,143,99,26,193,96,31,72,58,176,105,32,218,103,69,110,28,254,112,38,201,66,51,106,21,130,113,47];
       const APP_API_KEY = _d.map((b,i) => String.fromCharCode(b ^ _s[i % _s.length])).join('');
@@ -92,7 +92,6 @@
         constructor(avatar) {
           super();
           this.avatar = avatar;
-          this.apiKey = APP_API_KEY;
           this.model  = 'gemini-2.5-flash-preview-native-audio-dialog';
           this.transcription = null;
           this.isVisionProcessing = false;
@@ -247,14 +246,21 @@
       document.addEventListener('DOMContentLoaded', async () => {
         const options = new xb.Options();
         options.enableUI();
-        options.enableAI({ apiKey: APP_API_KEY });
+        options.enableAI();
         options.enableHands();
         options.enableCamera('environment');
 
-        await requestMicrophone();
+        // xb.core.ai resolves its key from the URL — inject it before xb.init() reads it,
+        // then immediately clean the URL so the key never stays visible in the address bar.
+        const _u = new URL(location.href);
+        _u.searchParams.set('geminiKey64', btoa(APP_API_KEY));
+        history.replaceState(null, '', _u.toString());
 
+        await requestMicrophone();
         xb.add(new MainScript());
         xb.init(options);
+
+        history.replaceState(null, '', location.pathname);
       });
     </script>
   </body>
