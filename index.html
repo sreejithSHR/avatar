@@ -5,6 +5,44 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
     <link type="text/css" rel="stylesheet" href="https://xrblocks.github.io/css/xr.css" />
+    <style>
+      #key-overlay {
+        position: fixed; inset: 0;
+        background: rgba(0, 0, 0, 0.88);
+        display: flex; align-items: center; justify-content: center;
+        z-index: 9999; font-family: system-ui, sans-serif;
+      }
+      #key-overlay.hidden { display: none; }
+      #key-box {
+        background: #0e1120; border: 1px solid #0088ff;
+        border-radius: 14px; padding: 36px; max-width: 420px; width: 90%;
+        color: #fff; box-shadow: 0 0 40px rgba(0,136,255,0.25);
+      }
+      #key-box h2 { margin: 0 0 6px; color: #0088ff; font-size: 1.2em; }
+      #key-box p  { margin: 0 0 20px; font-size: 0.82em; color: #9aa; line-height: 1.5; }
+      #key-input {
+        width: 100%; box-sizing: border-box; padding: 11px 13px;
+        border: 1px solid #334; border-radius: 7px; background: #0a0d18;
+        color: #fff; font-size: 0.9em; margin-bottom: 6px;
+        outline: none; transition: border-color 0.2s;
+      }
+      #key-input:focus { border-color: #0088ff; }
+      #key-hint { font-size: 0.75em; color: #556; margin-bottom: 16px; }
+      #key-submit {
+        width: 100%; padding: 11px; background: #0088ff; color: #fff;
+        border: none; border-radius: 7px; font-size: 1em; cursor: pointer;
+        transition: background 0.2s;
+      }
+      #key-submit:hover { background: #006ecc; }
+      #key-error { color: #ff5555; font-size: 0.8em; margin-top: 10px; display: none; }
+      #key-reset {
+        position: fixed; bottom: 12px; right: 14px;
+        background: rgba(0,0,0,0.6); color: #556; border: 1px solid #223;
+        border-radius: 6px; padding: 4px 10px; font-size: 0.72em; cursor: pointer;
+        z-index: 100;
+      }
+      #key-reset:hover { color: #fff; border-color: #446; }
+    </style>
     <script>
       window.litDisableBundleWarning = true;
     </script>
@@ -28,17 +66,63 @@
     </script>
   </head>
   <body>
+
+    <!-- API key is never stored in source — entered by the user and kept in localStorage -->
+    <div id="key-overlay">
+      <div id="key-box">
+        <h2>Gemini API Key</h2>
+        <p>
+          Your key is saved in <strong>your browser only</strong> (localStorage).<br>
+          It is never sent anywhere except directly to Google's Gemini API.
+        </p>
+        <input type="password" id="key-input" placeholder="Paste your Gemini API key…" autocomplete="off" />
+        <div id="key-hint">Get a free key at aistudio.google.com</div>
+        <button id="key-submit">Launch Experience</button>
+        <div id="key-error">Please enter a valid API key.</div>
+      </div>
+    </div>
+
+    <button id="key-reset" title="Change API key">&#9881; Change Key</button>
+
     <script type="module">
       import * as THREE from 'three';
       import * as xb from 'xrblocks';
       import { GeminiManager as CoreGeminiManager } from 'xrblocks/addons/ai/GeminiManager.js';
-
-      // Required for desktop simulation UI
       import 'xrblocks/addons/simulator/SimulatorAddons.js';
 
-      /**
-       * Manages conversation transcription state and display.
-       */
+      // ── API key management ──────────────────────────────────────────────────
+      const LS_KEY = 'xr_gemini_key';
+      const overlay  = document.getElementById('key-overlay');
+      const keyInput = document.getElementById('key-input');
+      const keyBtn   = document.getElementById('key-submit');
+      const keyErr   = document.getElementById('key-error');
+      const resetBtn = document.getElementById('key-reset');
+
+      let APP_API_KEY = localStorage.getItem(LS_KEY) || '';
+
+      keyBtn.addEventListener('click', () => {
+        const val = keyInput.value.trim();
+        if (val.length < 20) { keyErr.style.display = 'block'; return; }
+        APP_API_KEY = val;
+        localStorage.setItem(LS_KEY, val);
+        overlay.classList.add('hidden');
+        startApp();
+      });
+      keyInput.addEventListener('keydown', e => { if (e.key === 'Enter') keyBtn.click(); });
+      resetBtn.addEventListener('click', () => {
+        localStorage.removeItem(LS_KEY);
+        APP_API_KEY = '';
+        keyInput.value = '';
+        keyErr.style.display = 'none';
+        overlay.classList.remove('hidden');
+      });
+
+      if (APP_API_KEY) {
+        overlay.classList.add('hidden');
+        startApp();
+      }
+      // ───────────────────────────────────────────────────────────────────────
+
       class TranscriptionHandler {
         constructor(view) {
           this.view = view;
@@ -47,57 +131,54 @@
           this.currentOut = "";
         }
 
-        addInput(text) {
-          this.currentIn += text;
-          this.refresh();
-        }
-
-        addOutput(text) {
-          this.currentOut += text;
-          this.refresh();
-        }
+        addInput(text)  { this.currentIn  += text; this.refresh(); }
+        addOutput(text) { this.currentOut += text; this.refresh(); }
 
         addStatus(text) {
           this.view.addText(`\n[${text}]\n`);
         }
 
         finalize() {
-          if (this.currentIn.trim()) this.history.push({ role: 'You', text: this.currentIn.trim() });
-          if (this.currentOut.trim()) this.history.push({ role: 'AI', text: this.currentOut.trim() });
-          this.currentIn = "";
+          if (this.currentIn.trim())  this.history.push({ role: 'You', text: this.currentIn.trim() });
+          if (this.currentOut.trim()) this.history.push({ role: 'AI',  text: this.currentOut.trim() });
+          this.currentIn  = "";
           this.currentOut = "";
           this.refresh();
         }
 
         refresh() {
           let content = "";
-          // Show last 3 exchanges
-          this.history.slice(-3).forEach(h => {
-            content += `${h.role}: ${h.text}\n\n`;
-          });
-          if (this.currentIn) content += `You: ${this.currentIn}`;
+          this.history.slice(-3).forEach(h => { content += `${h.role}: ${h.text}\n\n`; });
+          if (this.currentIn)  content += `You: ${this.currentIn}`;
           if (this.currentOut) {
             if (this.currentIn) content += '\n\n';
             content += `AI: ${this.currentOut}`;
           }
-          this.view.setText(content || "Ready to listen...");
+          this.view.setText(content || "Ready to listen…");
         }
 
         clear() {
           this.history = [];
-          this.currentIn = "";
-          this.currentOut = "";
-          this.view.setText("Say 'Hello' or use Vision...");
+          this.currentIn = this.currentOut = "";
+          this.view.setText("Say hello, or ask 'What do you see?'");
         }
       }
 
-      /**
-       * AI Manager handling Gemini Live Voice and Vision interactions.
-       */
+      const VISION_TRIGGERS = [
+        'what do you see', 'what do i see', 'what can you see',
+        'look around', 'describe what you see', 'what is around',
+        'what surrounds', "what's around", 'what is in front',
+        'scan the room', 'use vision', 'open your eyes',
+        'analyze the environment', 'describe the environment'
+      ];
+
       class VoiceAIManager extends CoreGeminiManager {
         constructor(avatar) {
           super();
           this.avatar = avatar;
+          // Set model and key before init() is called by xrblocks
+          this.apiKey = APP_API_KEY;
+          this.model  = 'gemini-2.5-flash-preview-native-audio-dialog';
           this.transcription = null;
           this.isVisionProcessing = false;
         }
@@ -106,50 +187,47 @@
           super.init();
           this.setupUI();
 
-          // Listen for AI events
-          this.addEventListener('inputTranscription', (e) => this.transcription?.addInput(e.message));
+          this.addEventListener('inputTranscription',  (e) => this.transcription?.addInput(e.message));
           this.addEventListener('outputTranscription', (e) => this.transcription?.addOutput(e.message));
-          this.addEventListener('turnComplete', () => this.transcription?.finalize());
+          this.addEventListener('turnComplete', () => {
+            const spoken = (this.transcription?.currentIn || '').toLowerCase();
+            if (VISION_TRIGGERS.some(t => spoken.includes(t))) {
+              this.analyzeEnvironment();
+            }
+            this.transcription?.finalize();
+          });
         }
 
         setupUI() {
-          this.panel = new xb.SpatialPanel({
-            width: 2.2,
-            height: 1.4,
-            backgroundColor: '#111111dd'
-          });
+          this.panel = new xb.SpatialPanel({ width: 2.2, height: 1.4, backgroundColor: '#111111dd' });
           this.panel.position.set(0, 1.2, -1.8);
           this.add(this.panel);
 
           const grid = this.panel.addGrid();
-          
-          // Transcription View
-          const textRow = grid.addRow({ weight: 0.65 });
+
+          const textRow  = grid.addRow({ weight: 0.65 });
           const textView = new xb.ScrollingTroikaTextView({
-            text: 'Press START to chat, or VISION to analyze surroundings.',
+            text: "Press START VOICE, or ask 'What do you see?' for vision.",
             fontSize: 0.045,
             textAlign: 'left'
           });
           textRow.add(textView);
           this.transcription = new TranscriptionHandler(textView);
 
-          // Controls
-          const btnRow = grid.addRow({ weight: 0.35 });
-          
-          // Voice Toggle
+          const btnRow   = grid.addRow({ weight: 0.35 });
+
           const voiceCol = btnRow.addCol({ weight: 0.5 });
           this.toggleBtn = voiceCol.addTextButton({
-            text: '▶ STArRT VOICE',
+            text: '▶ START VOICE',
             backgroundColor: '#0088ff',
             fontColor: '#ffffff',
             fontSize: 0.15
           });
           this.toggleBtn.onTriggered = () => this.toggleVoice();
 
-          // Vision Button
           const visionCol = btnRow.addCol({ weight: 0.5 });
-          this.visionBtn = visionCol.addTextButton({
-            text: '👁 VISION ANALYZE',
+          this.visionBtn  = visionCol.addTextButton({
+            text: '👁 VISION',
             backgroundColor: '#34a853',
             fontColor: '#ffffff',
             fontSize: 0.15
@@ -177,24 +255,21 @@
 
         async analyzeEnvironment() {
           if (this.isVisionProcessing || !xb.core.ai?.isAvailable()) return;
-          
+
           this.isVisionProcessing = true;
-          this.transcription.addStatus("Analyzing environment...");
+          this.transcription.addStatus("Analyzing environment…");
           this.visionBtn.backgroundColor = '#888888';
 
           try {
-            // Capture current view
             const base64Image = await xb.core.screenshotSynthesizer.getScreenshot();
             if (!base64Image) throw new Error("Could not capture screenshot.");
 
             const { strippedBase64, mimeType } = xb.parseBase64DataURL(base64Image);
-            
-            const prompt = "Describe what you see in this environment and tell me one interesting fact about it.";
             const response = await xb.core.ai.query({
               type: 'multiPart',
               parts: [
                 { inlineData: { mimeType, data: strippedBase64 } },
-                { text: prompt }
+                { text: "Describe what you see in this environment and tell me one interesting fact about it." }
               ]
             });
 
@@ -209,32 +284,23 @@
         }
       }
 
-      /**
-       * Main Script extending xb.Script
-       */
       class MainScript extends xb.Script {
         init() {
-          // Add Lights
           this.add(new THREE.HemisphereLight(0xffffff, 0x444444, 3));
           const dirLight = new THREE.DirectionalLight(0xffffff, 2);
           dirLight.position.set(5, 5, 5);
           this.add(dirLight);
 
-          // Create the Cube Avatar
           const geometry = new THREE.BoxGeometry(0.4, 0.4, 0.4);
-          const material = new THREE.MeshPhongMaterial({ 
-            color: 0x00ccff,
-            emissive: 0x002244,
-            shininess: 100 
+          const material = new THREE.MeshPhongMaterial({
+            color: 0x00ccff, emissive: 0x002244, shininess: 100
           });
           this.cube = new THREE.Mesh(geometry, material);
           this.cube.position.set(0, 1.5, -1.2);
           this.add(this.cube);
 
-          // Initialize AI
           this.aiManager = new VoiceAIManager(this.cube);
           this.add(this.aiManager);
-
           this.time = 0;
         }
 
@@ -242,19 +308,17 @@
           const dt = xb.getDeltaTime();
           this.time += dt;
 
-          // Constant rotation
           this.cube.rotation.y += dt * 0.5;
           this.cube.rotation.z += dt * 0.3;
 
-          // Pulse effect when AI (Voice or Vision) is active
           const isActive = this.aiManager.isAIRunning || this.aiManager.isVisionProcessing;
-          
           if (isActive) {
             const speed = this.aiManager.isVisionProcessing ? 10 : 5;
             const pulse = 1.0 + Math.sin(this.time * speed) * 0.15;
             this.cube.scale.setScalar(pulse);
-            
-            const targetColor = this.aiManager.isVisionProcessing ? new THREE.Color(0x34a853) : new THREE.Color(0xff00ff);
+            const targetColor = this.aiManager.isVisionProcessing
+              ? new THREE.Color(0x34a853)
+              : new THREE.Color(0xff00ff);
             this.cube.material.color.lerp(targetColor, 0.05);
           } else {
             this.cube.scale.lerp(new THREE.Vector3(1, 1, 1), 0.1);
@@ -263,30 +327,29 @@
         }
       }
 
-      // Permissions Helper
       async function requestMicrophone() {
         try {
           const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
           stream.getTracks().forEach(t => t.stop());
           return true;
-        } catch (e) {
-          console.warn("Microphone access needed for AI voice features.");
+        } catch {
+          console.warn("Microphone access needed for voice features.");
           return false;
         }
       }
 
-      document.addEventListener('DOMContentLoaded', async () => {
+      async function startApp() {
         const options = new xb.Options();
         options.enableUI();
-        options.enableAI();
+        options.enableAI({ apiKey: APP_API_KEY });
         options.enableHands();
-        options.enableCamera('environment'); // Needed for Vision
+        options.enableCamera('environment');
 
         await requestMicrophone();
-        
+
         xb.add(new MainScript());
         xb.init(options);
-      });
+      }
     </script>
   </body>
 </html>
