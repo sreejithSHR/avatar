@@ -102,13 +102,24 @@
         'analyze the environment', 'describe the environment'
       ];
 
+      const LIVE_MODEL = 'gemini-2.5-flash-preview-native-audio-dialog';
+
+      function speak(text) {
+        if (!window.speechSynthesis || !text) return;
+        speechSynthesis.cancel();
+        const utt = new SpeechSynthesisUtterance(text);
+        utt.rate = 1.05;
+        utt.pitch = 1.0;
+        speechSynthesis.speak(utt);
+      }
+
       class VoiceAIManager extends CoreGeminiManager {
         constructor(avatar) {
           super();
           this.avatar = avatar;
-          this.model  = 'gemini-2.5-flash-preview-native-audio-dialog';
           this.transcription = null;
           this.isVisionProcessing = false;
+          this._voiceActive = false;
         }
 
         init() {
@@ -157,19 +168,24 @@
         }
 
         async toggleVoice() {
-          if (this.isAIRunning) {
-            await this.stopGeminiLive();
+          if (this._voiceActive) {
+            try { await this.stopGeminiLive(); } catch {}
+            this._voiceActive = false;
             this.toggleBtn.setText('▶ START VOICE');
             this.toggleBtn.backgroundColor = '#0088ff';
+            speechSynthesis.cancel();
             this.transcription.clear();
           } else {
             try {
               await xb.core.sound.enableAudio();
-              await this.startGeminiLive();
+              // model must be passed as argument — GeminiManager does not read this.model
+              await this.startGeminiLive({ model: LIVE_MODEL });
+              this._voiceActive = true;
               this.toggleBtn.setText('⏹ STOP VOICE');
               this.toggleBtn.backgroundColor = '#ff4444';
             } catch (err) {
               console.error(err);
+              this.transcription.addStatus("Could not start voice — check mic permissions");
             }
           }
         }
@@ -195,9 +211,15 @@
             });
 
             this.transcription.addOutput(`[VISION] ${response.text}\n`);
+            speak(response.text);
           } catch (err) {
-            console.error(err);
-            this.transcription.addOutput(`[VISION ERROR] ${err.message}\n`);
+            const code = err?.code ?? err?.status ?? (err?.message || '');
+            if (String(code).includes('503') || String(err?.message).includes('503') || String(err?.message).includes('high demand')) {
+              this.transcription.addStatus("Vision is busy — please try again in a moment");
+            } else {
+              console.error(err);
+              this.transcription.addStatus("Vision unavailable");
+            }
           } finally {
             this.isVisionProcessing = false;
             this.visionBtn.backgroundColor = '#34a853';
