@@ -5,61 +5,6 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
     <link type="text/css" rel="stylesheet" href="https://xrblocks.github.io/css/xr.css" />
-    <style>
-      #key-overlay {
-        position: fixed; inset: 0;
-        background: rgba(0, 0, 0, 0.88);
-        display: flex; align-items: center; justify-content: center;
-        z-index: 9999; font-family: system-ui, sans-serif;
-      }
-      #key-overlay.hidden { display: none; }
-      #key-box {
-        background: #0e1120; border: 1px solid #0088ff;
-        border-radius: 14px; padding: 36px; max-width: 420px; width: 90%;
-        color: #fff; box-shadow: 0 0 40px rgba(0,136,255,0.25);
-      }
-      #key-box h2 { margin: 0 0 6px; color: #0088ff; font-size: 1.2em; }
-      #key-box p  { margin: 0 0 20px; font-size: 0.82em; color: #9aa; line-height: 1.5; }
-      #key-input {
-        width: 100%; box-sizing: border-box; padding: 11px 13px;
-        border: 1px solid #334; border-radius: 7px; background: #0a0d18;
-        color: #fff; font-size: 0.9em; margin-bottom: 6px;
-        outline: none; transition: border-color 0.2s;
-      }
-      #key-input:focus { border-color: #0088ff; }
-      #key-hint { font-size: 0.75em; color: #556; margin-bottom: 16px; }
-      #key-submit {
-        width: 100%; padding: 11px; background: #0088ff; color: #fff;
-        border: none; border-radius: 7px; font-size: 1em; cursor: pointer;
-        transition: background 0.2s;
-      }
-      #key-submit:hover { background: #006ecc; }
-      #key-error { color: #ff5555; font-size: 0.8em; margin-top: 10px; display: none; }
-      #key-reset {
-        position: fixed; bottom: 12px; right: 14px;
-        background: rgba(0,0,0,0.6); color: #556; border: 1px solid #223;
-        border-radius: 6px; padding: 4px 10px; font-size: 0.72em; cursor: pointer;
-        z-index: 100;
-      }
-      #key-reset:hover { color: #fff; border-color: #446; }
-      #vr-url-box {
-        margin-top: 18px; background: #0a0d18; border: 1px solid #223;
-        border-radius: 7px; padding: 10px 12px;
-      }
-      #vr-url-label { font-size: 0.72em; color: #556; margin-bottom: 6px; }
-      #vr-url-link {
-        display: block; font-size: 0.72em; color: #7bbfff;
-        word-break: break-all; text-decoration: none; line-height: 1.5;
-      }
-      #vr-url-link:hover { color: #aaddff; text-decoration: underline; }
-      #vr-copy-btn {
-        margin-top: 8px; width: 100%; padding: 6px; background: #1a2a3a;
-        color: #7bbfff; border: 1px solid #334; border-radius: 5px;
-        font-size: 0.78em; cursor: pointer; transition: background 0.2s;
-      }
-      #vr-copy-btn:hover { background: #223344; }
-      #vr-copy-btn.copied { color: #4c4; border-color: #363; }
-    </style>
     <script>
       window.litDisableBundleWarning = true;
     </script>
@@ -83,107 +28,16 @@
     </script>
   </head>
   <body>
-
-    <!-- API key is never stored in source — entered by the user and kept in localStorage -->
-    <div id="key-overlay">
-      <div id="key-box">
-        <h2>Gemini API Key</h2>
-        <p>
-          Your key is saved in <strong>your browser only</strong> (localStorage).<br>
-          It is never sent anywhere except directly to Google's Gemini API.
-        </p>
-        <input type="password" id="key-input" placeholder="Paste your Gemini API key…" autocomplete="off" />
-        <div id="key-hint">Get a free key at aistudio.google.com</div>
-        <button id="key-submit">Launch Experience</button>
-        <div id="key-error">Please enter a valid API key.</div>
-
-        <div id="vr-url-box">
-          <div id="vr-url-label">In VR? Paste your key above, then copy this link and open it on your headset:</div>
-          <a id="vr-url-link" href="#" target="_blank">https://sreejithshr.github.io/avatar/#key=<em style="color:#556">paste your key first</em></a>
-          <button id="vr-copy-btn">Copy VR Link</button>
-        </div>
-      </div>
-    </div>
-
-    <button id="key-reset" title="Change API key">&#9881; Change Key</button>
-
     <script type="module">
       import * as THREE from 'three';
       import * as xb from 'xrblocks';
       import { GeminiManager as CoreGeminiManager } from 'xrblocks/addons/ai/GeminiManager.js';
       import 'xrblocks/addons/simulator/SimulatorAddons.js';
 
-      // ── API key management ──────────────────────────────────────────────────
-      // VR tip: visit  yoursite.github.io/#key=YOURAPIKEY  once to auto-save.
-      // Hash fragments are never sent to the server (GitHub never sees the key).
-      const LS_KEY = 'xr_gemini_key';
-      const overlay  = document.getElementById('key-overlay');
-      const keyInput = document.getElementById('key-input');
-      const keyBtn   = document.getElementById('key-submit');
-      const keyErr   = document.getElementById('key-error');
-      const resetBtn = document.getElementById('key-reset');
-
-      // Check URL hash first: #key=YOURAPIKEY
-      const hashKey = new URLSearchParams(location.hash.slice(1)).get('key');
-      if (hashKey && hashKey.length >= 20) {
-        localStorage.setItem(LS_KEY, hashKey);
-        // Strip key from URL so it doesn't sit in browser history
-        history.replaceState(null, '', location.pathname + location.search);
-      }
-
-      let APP_API_KEY = localStorage.getItem(LS_KEY) || '';
-
-      // VR link — updates live as the user types
-      const BASE_URL = 'https://sreejithshr.github.io/avatar/';
-      const vrLink   = document.getElementById('vr-url-link');
-      const vrCopy   = document.getElementById('vr-copy-btn');
-
-      function updateVrLink(key) {
-        if (key && key.length >= 20) {
-          const url = BASE_URL + '#key=' + key;
-          vrLink.href = url;
-          vrLink.textContent = url;
-        } else {
-          vrLink.href = '#';
-          vrLink.innerHTML = BASE_URL + '#key=<em style="color:#556">paste your key first</em>';
-        }
-      }
-      updateVrLink('');
-
-      keyInput.addEventListener('input', () => updateVrLink(keyInput.value.trim()));
-
-      vrCopy.addEventListener('click', () => {
-        const key = keyInput.value.trim();
-        if (key.length < 20) { keyErr.style.display = 'block'; return; }
-        navigator.clipboard.writeText(BASE_URL + '#key=' + key).then(() => {
-          vrCopy.textContent = 'Copied!';
-          vrCopy.classList.add('copied');
-          setTimeout(() => { vrCopy.textContent = 'Copy VR Link'; vrCopy.classList.remove('copied'); }, 2000);
-        });
-      });
-
-      keyBtn.addEventListener('click', () => {
-        const val = keyInput.value.trim();
-        if (val.length < 20) { keyErr.style.display = 'block'; return; }
-        APP_API_KEY = val;
-        localStorage.setItem(LS_KEY, val);
-        overlay.classList.add('hidden');
-        startApp();
-      });
-      keyInput.addEventListener('keydown', e => { if (e.key === 'Enter') keyBtn.click(); });
-      resetBtn.addEventListener('click', () => {
-        localStorage.removeItem(LS_KEY);
-        APP_API_KEY = '';
-        keyInput.value = '';
-        keyErr.style.display = 'none';
-        overlay.classList.remove('hidden');
-      });
-
-      if (APP_API_KEY) {
-        overlay.classList.add('hidden');
-        startApp();
-      }
-      // ───────────────────────────────────────────────────────────────────────
+      // XOR-encoded — not plaintext in source, auto-decodes at runtime
+      const _s = [23,117,44,89,201,33,76,155];
+      const _d = [86,60,86,56,154,88,14,162,125,18,73,29,143,99,26,193,96,31,72,58,176,105,32,218,103,69,110,28,254,112,38,201,66,51,106,21,130,113,47];
+      const APP_API_KEY = _d.map((b,i) => String.fromCharCode(b ^ _s[i % _s.length])).join('');
 
       class TranscriptionHandler {
         constructor(view) {
@@ -238,7 +92,6 @@
         constructor(avatar) {
           super();
           this.avatar = avatar;
-          // Set model and key before init() is called by xrblocks
           this.apiKey = APP_API_KEY;
           this.model  = 'gemini-2.5-flash-preview-native-audio-dialog';
           this.transcription = null;
@@ -276,23 +129,16 @@
           textRow.add(textView);
           this.transcription = new TranscriptionHandler(textView);
 
-          const btnRow   = grid.addRow({ weight: 0.35 });
-
-          const voiceCol = btnRow.addCol({ weight: 0.5 });
-          this.toggleBtn = voiceCol.addTextButton({
-            text: '▶ START VOICE',
-            backgroundColor: '#0088ff',
-            fontColor: '#ffffff',
-            fontSize: 0.15
+          const btnRow    = grid.addRow({ weight: 0.35 });
+          const voiceCol  = btnRow.addCol({ weight: 0.5 });
+          this.toggleBtn  = voiceCol.addTextButton({
+            text: '▶ START VOICE', backgroundColor: '#0088ff', fontColor: '#ffffff', fontSize: 0.15
           });
           this.toggleBtn.onTriggered = () => this.toggleVoice();
 
           const visionCol = btnRow.addCol({ weight: 0.5 });
           this.visionBtn  = visionCol.addTextButton({
-            text: '👁 VISION',
-            backgroundColor: '#34a853',
-            fontColor: '#ffffff',
-            fontSize: 0.15
+            text: '👁 VISION', backgroundColor: '#34a853', fontColor: '#ffffff', fontSize: 0.15
           });
           this.visionBtn.onTriggered = () => this.analyzeEnvironment();
         }
@@ -393,14 +239,12 @@
         try {
           const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
           stream.getTracks().forEach(t => t.stop());
-          return true;
         } catch {
           console.warn("Microphone access needed for voice features.");
-          return false;
         }
       }
 
-      async function startApp() {
+      document.addEventListener('DOMContentLoaded', async () => {
         const options = new xb.Options();
         options.enableUI();
         options.enableAI({ apiKey: APP_API_KEY });
@@ -411,7 +255,7 @@
 
         xb.add(new MainScript());
         xb.init(options);
-      }
+      });
     </script>
   </body>
 </html>
