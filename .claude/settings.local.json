@@ -8,7 +8,9 @@
       "WebFetch(domain:deepwiki.com)",
       "WebFetch(domain:xrblocks.github.io)",
       "WebFetch(domain:raw.githubusercontent.com)",
-      "WebFetch(domain:www.npmjs.com)"
+      "WebFetch(domain:www.npmjs.com)",
+      "Bash(curl -s https://cdn.jsdelivr.net/npm/xrblocks@0.11.0/build/xrblocks.js)",
+      "Bash(curl -s -I https://cdn.jsdelivr.net/npm/xrblocks@0.11.0/build/xrblocks.js)"
     ]
   }
 }

@@ -217,48 +217,71 @@
           preloadCoco(); // start loading model in background
         }
 
-        // Every frame: try to parent panel to left controller once XR is active
         update() {
-          if (this._handAttached) return;
+          // Attach panel to left hand once XR controllers are available
+          if (!this._handAttached) {
+            const leftCtrl = xb.core?.user?.controllers?.[0]
+                          ?? xb.core?.user?.hands?.hands?.[0];
+            if (leftCtrl && leftCtrl.children !== undefined) {
+              leftCtrl.add(this.panel);
+              this.panel.position.set(0, 0.03, -0.07);
+              this.panel.rotation.set(-0.7, 0, 0);
+              this._handAttached = true;
+            }
+          }
 
-          // xb.core.user.controllers is indexed by Handedness (LEFT = 0)
-          const leftCtrl = xb.core?.user?.controllers?.[0]
-                        ?? xb.core?.user?.hands?.hands?.[0];
-
-          if (leftCtrl && leftCtrl.children !== undefined) {
-            leftCtrl.add(this.panel);
-            // Position above wrist, tilted to face user when palm faces up
-            this.panel.position.set(0, 0.03, -0.06);
-            this.panel.rotation.set(-0.7, 0, 0);
-            this._handAttached = true;
+          // Blink status bar while listening
+          if (this.isListening) {
+            this._blinkT = (this._blinkT || 0) + xb.getDeltaTime();
+            const on = Math.floor(this._blinkT * 2) % 2 === 0;
+            this.statusView?.setText(on ? '● REC  —  LISTENING' : '○ REC  —  LISTENING');
           }
         }
 
         setupUI() {
-          // Compact wrist panel
-          this.panel = new xb.SpatialPanel({ width: 0.22, height: 0.17, backgroundColor: '#111111ee' });
-          // Default world-space position (desktop / pre-XR fallback)
-          this.panel.position.set(0, 1.2, -0.5);
+          // Watch face — squircle shape via useBorderlessShader
+          this.panel = new xb.SpatialPanel({
+            width: 0.28, height: 0.26,
+            backgroundColor: '#07090f',
+            useBorderlessShader: true,
+            showEdge: true,
+            draggable: false
+          });
+          this.panel.position.set(0, 1.2, -0.5); // desktop fallback; overridden by update() in XR
           this.add(this.panel);
 
-          const grid    = this.panel.addGrid();
-          const textRow = grid.addRow({ weight: 0.62 });
+          const grid = this.panel.addGrid();
+
+          // ── Row 1: status bar ───────────────────────────────────────────
+          const statusRow  = grid.addRow({ weight: 0.14 });
+          this.statusView  = new xb.ScrollingTroikaTextView({
+            text: '⌚  AI WATCH  —  READY',
+            fontSize: 0.014,
+            textAlign: 'center'
+          });
+          statusRow.add(this.statusView);
+
+          // ── Row 2: scrolling conversation ───────────────────────────────
+          const textRow  = grid.addRow({ weight: 0.54 });
           const textView = new xb.ScrollingTroikaTextView({
-            text: 'Press START or VISION', fontSize: 0.011, textAlign: 'left'
+            text: "Say hello, or ask 'What do you see?'",
+            fontSize: 0.019,
+            textAlign: 'left'
           });
           textRow.add(textView);
           this.transcription = new TranscriptionHandler(textView);
 
-          const btnRow    = grid.addRow({ weight: 0.38 });
+          // ── Row 3: buttons ───────────────────────────────────────────────
+          const btnRow    = grid.addRow({ weight: 0.32 });
           const voiceCol  = btnRow.addCol({ weight: 0.5 });
           this.toggleBtn  = voiceCol.addTextButton({
-            text: '▶ VOICE', backgroundColor: '#0088ff', fontColor: '#fff', fontSize: 0.013
+            text: '▶  VOICE', backgroundColor: '#0055cc', fontColor: '#fff', fontSize: 0.015
           });
           this.toggleBtn.onTriggered = () => this.toggleVoice();
 
           const visionCol = btnRow.addCol({ weight: 0.5 });
           this.visionBtn  = visionCol.addTextButton({
-            text: '👁 VISION', backgroundColor: '#34a853', fontColor: '#fff', fontSize: 0.013
+            text: '👁  VISION', backgroundColor: '#155c2a', fontColor: '#fff', fontSize: 0.015
           });
           this.visionBtn.onTriggered = () => this.analyzeEnvironment();
         }
@@ -266,11 +289,13 @@
         async toggleVoice() {
           if (this.isListening) {
             this.isListening = false;
+            this._blinkT = 0;
             this.stt?.stop();
             this.stt = null;
             speechSynthesis.cancel();
-            this.toggleBtn.setText('▶ VOICE');
-            this.toggleBtn.backgroundColor = '#0088ff';
+            this.toggleBtn.setText('▶  VOICE');
+            this.toggleBtn.backgroundColor = '#0055cc';
+            this.statusView?.setText('⌚  AI WATCH  —  READY');
             this.transcription.clear();
           } else {
             try {
@@ -280,14 +305,13 @@
               );
               await this.stt.start();
               this.isListening = true;
-              this.toggleBtn.setText('⏹ STOP');
-              this.toggleBtn.backgroundColor = '#ff4444';
-              this.transcription.addStatus('Listening via Whisper…');
+              this._blinkT = 0;
+              this.toggleBtn.setText('⏹  STOP');
+              this.toggleBtn.backgroundColor = '#cc2200';
             } catch (err) {
+              this.statusView?.setText('⌚  AI WATCH  —  MIC ERROR');
               this.transcription.addStatus(
-                err.name === 'NotAllowedError'
-                  ? 'Mic denied — allow microphone access'
-                  : 'Could not start mic'
+                err.name === 'NotAllowedError' ? 'Mic permission denied' : 'Could not start mic'
               );
             }
           }
@@ -300,25 +324,30 @@
             return;
           }
 
+          // Show user speech immediately in scroller
           this.transcription.addInput(text);
           this.history.push({ role: 'user', content: text });
+          this.statusView?.setText('⌛  THINKING…');
 
           try {
             const reply = await nvidiaChat(this.history);
-            this.transcription.addOutput(reply);
             this.history.push({ role: 'assistant', content: reply });
+            this.transcription.addOutput(reply);
             speak(reply);
             this.transcription.finalize();
           } catch (err) {
             this._handleApiError(err, 'Chat');
+          } finally {
+            if (this.isListening) this._blinkT = 0; // resume blink
+            else this.statusView?.setText('⌚  AI WATCH  —  READY');
           }
         }
 
         async analyzeEnvironment() {
           if (this.isVisionProcessing) return;
           this.isVisionProcessing = true;
-          this.transcription.addStatus('Scanning scene…');
-          this.visionBtn.backgroundColor = '#888';
+          this.statusView?.setText('👁  SCANNING SCENE…');
+          this.visionBtn.backgroundColor = '#555';
 
           try {
             const result = await detectScene();
@@ -333,7 +362,9 @@
             console.error(err);
           } finally {
             this.isVisionProcessing = false;
-            this.visionBtn.backgroundColor = '#34a853';
+            this.visionBtn.backgroundColor = '#155c2a';
+            if (this.isListening) this._blinkT = 0;
+            else this.statusView?.setText('⌚  AI WATCH  —  READY');
           }
         }
 
