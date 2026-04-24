@@ -193,7 +193,7 @@
         }
         clear() {
           this.history = []; this.currentIn = this.currentOut = this._interim = '';
-          this.view.setText("Say hello, or ask 'What do you see?'");
+          this.view.setText("Say hello\nor ask 'What do you see?'");
         }
       }
 
@@ -224,8 +224,10 @@
                           ?? xb.core?.user?.hands?.hands?.[0];
             if (leftCtrl && leftCtrl.children !== undefined) {
               leftCtrl.add(this.panel);
-              this.panel.position.set(0, 0.03, -0.07);
-              this.panel.rotation.set(-0.7, 0, 0);
+              // Back of hand: positive Y = dorsal side, slightly forward along knuckles
+              this.panel.position.set(0, 0.06, 0.01);
+              // Lie flat on back of hand (-90° X = face up) + 90° anticlockwise (Z) for watch orientation
+              this.panel.rotation.set(-Math.PI / 2, 0, Math.PI / 2);
               this._handAttached = true;
             }
           }
@@ -253,20 +255,20 @@
           const grid = this.panel.addGrid();
 
           // ── Row 1: status bar ───────────────────────────────────────────
-          const statusRow  = grid.addRow({ weight: 0.14 });
+          const statusRow  = grid.addRow({ weight: 0.13 });
           this.statusView  = new xb.ScrollingTroikaTextView({
             text: '⌚  AI WATCH  —  READY',
-            fontSize: 0.014,
+            fontSize: 0.017,
             textAlign: 'center'
           });
           statusRow.add(this.statusView);
 
           // ── Row 2: scrolling conversation ───────────────────────────────
-          const textRow  = grid.addRow({ weight: 0.54 });
+          const textRow  = grid.addRow({ weight: 0.55 });
           const textView = new xb.ScrollingTroikaTextView({
-            text: "Say hello, or ask 'What do you see?'",
-            fontSize: 0.019,
-            textAlign: 'left'
+            text: "Say hello\nor ask 'What do you see?'",
+            fontSize: 0.024,
+            textAlign: 'center'
           });
           textRow.add(textView);
           this.transcription = new TranscriptionHandler(textView);
@@ -275,13 +277,13 @@
           const btnRow    = grid.addRow({ weight: 0.32 });
           const voiceCol  = btnRow.addCol({ weight: 0.5 });
           this.toggleBtn  = voiceCol.addTextButton({
-            text: '▶  VOICE', backgroundColor: '#0055cc', fontColor: '#fff', fontSize: 0.015
+            text: '▶  VOICE', backgroundColor: '#0055cc', fontColor: '#fff', fontSize: 0.018
           });
           this.toggleBtn.onTriggered = () => this.toggleVoice();
 
           const visionCol = btnRow.addCol({ weight: 0.5 });
           this.visionBtn  = visionCol.addTextButton({
-            text: '👁  VISION', backgroundColor: '#155c2a', fontColor: '#fff', fontSize: 0.015
+            text: '👁  VISION', backgroundColor: '#155c2a', fontColor: '#fff', fontSize: 0.018
           });
           this.visionBtn.onTriggered = () => this.analyzeEnvironment();
         }
@@ -413,16 +415,16 @@
         }
       }
 
-      document.addEventListener('DOMContentLoaded', async () => {
+      document.addEventListener('DOMContentLoaded', () => {
         const options = new xb.Options();
         options.enableUI();
         options.enableHands();
         options.enableCamera('environment'); // passthrough for real-world vision
 
-        try {
-          const s = await navigator.mediaDevices.getUserMedia({ audio: true });
-          s.getTracks().forEach(t => t.stop());
-        } catch { console.warn('Mic permission denied.'); }
+        // Do NOT pre-request mic here — Quest browser silently denies any getUserMedia
+        // that isn't triggered by a direct user gesture (button press).
+        // The VOICE button press in toggleVoice() IS a user gesture, so it will
+        // trigger the permission dialog correctly on Quest.
 
         xb.add(new MainScript());
         xb.init(options);
