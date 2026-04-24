@@ -5,14 +5,20 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
     <link type="text/css" rel="stylesheet" href="https://xrblocks.github.io/css/xr.css" />
+
     <script>
       window.litDisableBundleWarning = true;
-
-      // XOR-encoded NVIDIA key — to update: node -e "const k='NEW_KEY',s=[23,117,44,89,201,33,76,155];console.log(JSON.stringify([...k].map((c,i)=>c.charCodeAt(0)^s[i%s.length])))"
+      // XOR-encoded NVIDIA key
+      // To update: node -e "const k='NEW_KEY',s=[23,117,44,89,201,33,76,155];console.log(JSON.stringify([...k].map((c,i)=>c.charCodeAt(0)^s[i%s.length])))"
       const _s = [23,117,44,89,201,33,76,155];
       const _d = [121,3,77,41,160,12,27,193,92,49,28,61,164,72,9,237,122,45,125,54,167,82,7,234,110,49,68,61,141,22,47,194,101,5,110,28,164,116,10,233,37,54,26,1,165,110,56,169,112,88,66,15,191,88,42,255,72,71,91,13,141,121,27,206,36,27,127,30,228,73];
       window._nk = _d.map((b,i) => String.fromCharCode(b ^ _s[i % _s.length])).join('');
     </script>
+
+    <!-- TensorFlow.js + COCO-SSD for local object detection (no API call needed) -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
+
     <script type="importmap">
       {
         "imports": {
@@ -39,8 +45,8 @@
       import 'xrblocks/addons/simulator/SimulatorAddons.js';
 
       const NVIDIA_URL  = 'https://integrate.api.nvidia.com/v1/chat/completions';
+      const WHISPER_URL = 'https://integrate.api.nvidia.com/v1/audio/transcriptions';
       const CHAT_MODEL  = 'moonshotai/kimi-k2.5';
-      const VISION_MODEL = 'meta/llama-3.2-11b-vision-instruct';
 
       const VISION_TRIGGERS = [
         'what do you see','what do i see','what can you see','look around',
@@ -48,190 +54,242 @@
         'scan the room','use vision','open your eyes','analyze the environment'
       ];
 
-      // ── NVIDIA API ──────────────────────────────────────────────────────────
-      async function nvidiaChat(messages, model = CHAT_MODEL) {
+      // ── NVIDIA chat ─────────────────────────────────────────────────────────
+      async function nvidiaChat(messages) {
         const res = await fetch(NVIDIA_URL, {
           method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${window._nk}`,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({ model, messages, max_tokens: 512, temperature: 0.8, stream: false })
+          headers: { 'Authorization': `Bearer ${window._nk}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model: CHAT_MODEL, messages, max_tokens: 512, temperature: 0.8, stream: false })
         });
-        if (!res.ok) {
-          const err = await res.json().catch(() => ({}));
-          const e = new Error(err?.detail || `HTTP ${res.status}`);
-          e.status = res.status;
-          throw e;
-        }
-        const data = await res.json();
-        return data.choices[0].message.content.trim();
+        if (!res.ok) { const e = new Error(`HTTP ${res.status}`); e.status = res.status; throw e; }
+        return (await res.json()).choices[0].message.content.trim();
       }
 
       // ── TTS ─────────────────────────────────────────────────────────────────
       function speak(text) {
         if (!window.speechSynthesis || !text) return;
         speechSynthesis.cancel();
-        const utt = new SpeechSynthesisUtterance(text);
-        utt.rate  = 1.05;
-        utt.pitch = 1.0;
-        speechSynthesis.speak(utt);
+        const u = new SpeechSynthesisUtterance(text);
+        u.rate = 1.05; speechSynthesis.speak(u);
+      }
+
+      // ── COCO-SSD object detection (runs entirely in browser, no API) ────────
+      let _cocoModel = null;
+      async function preloadCoco() {
+        if (window.cocoSsd && !_cocoModel) _cocoModel = await window.cocoSsd.load();
+      }
+
+      async function detectScene() {
+        if (!_cocoModel) await preloadCoco();
+        if (!_cocoModel) throw new Error('COCO model not ready yet');
+
+        // Get scene as image via xrblocks screenshot (handles WebGL preserveDrawingBuffer safely)
+        let source;
+        if (xb.core.screenshotSynthesizer) {
+          const b64 = await xb.core.screenshotSynthesizer.getScreenshot();
+          source = await new Promise((res, rej) => {
+            const img = new Image(); img.onload = () => res(img); img.onerror = rej; img.src = b64;
+          });
+        } else {
+          source = xb.core.renderer?.domElement;
+        }
+        if (!source) throw new Error('No image source available');
+
+        const preds = await _cocoModel.detect(source);
+        if (!preds.length) return 'I don\'t detect any recognizable objects in the scene right now.';
+
+        const items = preds
+          .sort((a, b) => b.score - a.score)
+          .slice(0, 6)
+          .map(p => `${p.class} (${Math.round(p.score * 100)}%)`)
+          .join(', ');
+        return `I can see: ${items}.`;
+      }
+
+      // ── Whisper STT via NVIDIA (works on Quest — no browser Speech API needed) ──
+      class WhisperSTT {
+        constructor(onTranscript, onStatus) {
+          this.onTranscript = onTranscript;
+          this.onStatus     = onStatus;
+          this.isActive     = false;
+          this.stream       = null;
+        }
+
+        async start() {
+          this.stream   = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+          this.isActive = true;
+          this._record();
+        }
+
+        _record() {
+          if (!this.isActive || !this.stream) return;
+          const chunks = [];
+          const mime   = ['audio/webm;codecs=opus','audio/webm','audio/ogg']
+                           .find(m => MediaRecorder.isTypeSupported(m)) || '';
+          const rec    = new MediaRecorder(this.stream, mime ? { mimeType: mime } : {});
+
+          rec.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data); };
+          rec.onstop = async () => {
+            const blob = new Blob(chunks, { type: rec.mimeType || 'audio/webm' });
+            if (blob.size > 2500) await this._transcribe(blob);
+            this._record(); // immediately start next chunk
+          };
+
+          rec.start();
+          // Flush every 3 s — keeps latency acceptable without silence detection complexity
+          setTimeout(() => { try { if (rec.state === 'recording') rec.stop(); } catch {} }, 3000);
+        }
+
+        async _transcribe(blob) {
+          try {
+            const ext = blob.type.includes('ogg') ? 'ogg' : 'webm';
+            const fd  = new FormData();
+            fd.append('file',  blob, `speech.${ext}`);
+            fd.append('model', 'openai/whisper-large-v3');
+
+            const res = await fetch(WHISPER_URL, {
+              method: 'POST',
+              headers: { 'Authorization': `Bearer ${window._nk}` },
+              body: fd
+            });
+            if (!res.ok) return;
+            const text = (await res.json()).text?.trim();
+            if (text && text.length > 1) this.onTranscript(text);
+          } catch (err) {
+            console.error('Whisper STT:', err);
+          }
+        }
+
+        stop() {
+          this.isActive = false;
+          this.stream?.getTracks().forEach(t => t.stop());
+          this.stream = null;
+        }
       }
 
       // ── Transcription display ───────────────────────────────────────────────
       class TranscriptionHandler {
         constructor(view) {
-          this.view    = view;
-          this.history = [];
-          this.currentIn  = '';
-          this.currentOut = '';
-          this._interim   = '';
+          this.view = view; this.history = [];
+          this.currentIn = ''; this.currentOut = ''; this._interim = '';
         }
-
-        setInterim(text) { this._interim = text; this.refresh(); }
-
-        addInput(text)  { this.currentIn  += text; this._interim = ''; this.refresh(); }
-        addOutput(text) { this.currentOut += text; this.refresh(); }
-
-        addStatus(text) { this.view.addText(`\n[${text}]\n`); }
-
+        setInterim(t) { this._interim = t; this.refresh(); }
+        addInput(t)   { this.currentIn  += t; this._interim = ''; this.refresh(); }
+        addOutput(t)  { this.currentOut += t; this.refresh(); }
+        addStatus(t)  { this.view.addText(`\n[${t}]\n`); }
         finalize() {
           if (this.currentIn.trim())  this.history.push({ role: 'You', text: this.currentIn.trim() });
           if (this.currentOut.trim()) this.history.push({ role: 'AI',  text: this.currentOut.trim() });
           this.currentIn = this.currentOut = this._interim = '';
           this.refresh();
         }
-
         refresh() {
           let c = '';
           this.history.slice(-3).forEach(h => { c += `${h.role}: ${h.text}\n\n`; });
           const inp = this.currentIn + this._interim;
-          if (inp)           c += `You: ${inp}`;
-          if (this.currentOut) {
-            if (inp) c += '\n\n';
-            c += `AI: ${this.currentOut}`;
-          }
-          this.view.setText(c || 'Ready to listen…');
+          if (inp) c += `You: ${inp}`;
+          if (this.currentOut) { if (inp) c += '\n\n'; c += `AI: ${this.currentOut}`; }
+          this.view.setText(c || 'Ready…');
         }
-
         clear() {
-          this.history = [];
-          this.currentIn = this.currentOut = this._interim = '';
+          this.history = []; this.currentIn = this.currentOut = this._interim = '';
           this.view.setText("Say hello, or ask 'What do you see?'");
         }
       }
 
-      // ── AI Manager ──────────────────────────────────────────────────────────
+      // ── AI + Voice Manager ──────────────────────────────────────────────────
       class VoiceAIManager extends xb.Script {
         constructor(avatar) {
           super();
           this.avatar           = avatar;
           this.isListening      = false;
           this.isVisionProcessing = false;
-          this.history          = [];   // conversation memory
-          this.recognition      = null;
+          this.history          = [];
+          this.stt              = null;
           this.transcription    = null;
+          this._handAttached    = false;
         }
 
         get isAIRunning() { return this.isListening; }
 
         init() {
           this.setupUI();
-          this.setupSpeechRecognition();
+          preloadCoco(); // start loading model in background
+        }
+
+        // Every frame: try to parent panel to left controller once XR is active
+        update() {
+          if (this._handAttached) return;
+
+          // xb.core.user.controllers is indexed by Handedness (LEFT = 0)
+          const leftCtrl = xb.core?.user?.controllers?.[0]
+                        ?? xb.core?.user?.hands?.hands?.[0];
+
+          if (leftCtrl && leftCtrl.children !== undefined) {
+            leftCtrl.add(this.panel);
+            // Position above wrist, tilted to face user when palm faces up
+            this.panel.position.set(0, 0.03, -0.06);
+            this.panel.rotation.set(-0.7, 0, 0);
+            this._handAttached = true;
+          }
         }
 
         setupUI() {
-          this.panel = new xb.SpatialPanel({ width: 2.2, height: 1.4, backgroundColor: '#111111dd' });
-          this.panel.position.set(0, 1.2, -1.8);
+          // Compact wrist panel
+          this.panel = new xb.SpatialPanel({ width: 0.22, height: 0.17, backgroundColor: '#111111ee' });
+          // Default world-space position (desktop / pre-XR fallback)
+          this.panel.position.set(0, 1.2, -0.5);
           this.add(this.panel);
 
           const grid    = this.panel.addGrid();
-          const textRow = grid.addRow({ weight: 0.65 });
+          const textRow = grid.addRow({ weight: 0.62 });
           const textView = new xb.ScrollingTroikaTextView({
-            text: "Press START VOICE, or ask 'What do you see?'",
-            fontSize: 0.045, textAlign: 'left'
+            text: 'Press START or VISION', fontSize: 0.011, textAlign: 'left'
           });
           textRow.add(textView);
           this.transcription = new TranscriptionHandler(textView);
 
-          const btnRow    = grid.addRow({ weight: 0.35 });
+          const btnRow    = grid.addRow({ weight: 0.38 });
           const voiceCol  = btnRow.addCol({ weight: 0.5 });
           this.toggleBtn  = voiceCol.addTextButton({
-            text: '▶ START VOICE', backgroundColor: '#0088ff', fontColor: '#ffffff', fontSize: 0.15
+            text: '▶ VOICE', backgroundColor: '#0088ff', fontColor: '#fff', fontSize: 0.013
           });
           this.toggleBtn.onTriggered = () => this.toggleVoice();
 
           const visionCol = btnRow.addCol({ weight: 0.5 });
           this.visionBtn  = visionCol.addTextButton({
-            text: '👁 VISION', backgroundColor: '#34a853', fontColor: '#ffffff', fontSize: 0.15
+            text: '👁 VISION', backgroundColor: '#34a853', fontColor: '#fff', fontSize: 0.013
           });
           this.visionBtn.onTriggered = () => this.analyzeEnvironment();
         }
 
-        setupSpeechRecognition() {
-          const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-          if (!SR) {
-            this.transcription.addStatus('SpeechRecognition not available in this browser');
-            return;
-          }
-
-          this.recognition = new SR();
-          this.recognition.continuous     = true;
-          this.recognition.interimResults = true;
-          this.recognition.lang           = 'en-US';
-
-          let pendingFinal = '';
-
-          this.recognition.onresult = (e) => {
-            let interim = '';
-            for (let i = e.resultIndex; i < e.results.length; i++) {
-              if (e.results[i].isFinal) pendingFinal += e.results[i][0].transcript;
-              else                       interim      += e.results[i][0].transcript;
-            }
-            this.transcription.setInterim(pendingFinal + interim);
-
-            if (pendingFinal.trim()) {
-              const text = pendingFinal.trim();
-              pendingFinal = '';
-              this.handleSpeech(text);
-            }
-          };
-
-          this.recognition.onerror = (e) => {
-            if (e.error === 'not-allowed') {
-              this.transcription.addStatus('Mic permission denied — please allow microphone access');
-              this.isListening = false;
-              this.toggleBtn.setText('▶ START VOICE');
-              this.toggleBtn.backgroundColor = '#0088ff';
-            }
-          };
-
-          // Auto-restart while still active (browser stops on silence)
-          this.recognition.onend = () => {
-            if (this.isListening) {
-              try { this.recognition.start(); } catch {}
-            }
-          };
-        }
-
-        toggleVoice() {
+        async toggleVoice() {
           if (this.isListening) {
             this.isListening = false;
-            try { this.recognition?.stop(); } catch {}
+            this.stt?.stop();
+            this.stt = null;
             speechSynthesis.cancel();
-            this.toggleBtn.setText('▶ START VOICE');
+            this.toggleBtn.setText('▶ VOICE');
             this.toggleBtn.backgroundColor = '#0088ff';
             this.transcription.clear();
           } else {
-            if (!this.recognition) {
-              this.transcription.addStatus('SpeechRecognition not supported');
-              return;
+            try {
+              this.stt = new WhisperSTT(
+                text => this.handleSpeech(text),
+                msg  => this.transcription.addStatus(msg)
+              );
+              await this.stt.start();
+              this.isListening = true;
+              this.toggleBtn.setText('⏹ STOP');
+              this.toggleBtn.backgroundColor = '#ff4444';
+              this.transcription.addStatus('Listening via Whisper…');
+            } catch (err) {
+              this.transcription.addStatus(
+                err.name === 'NotAllowedError'
+                  ? 'Mic denied — allow microphone access'
+                  : 'Could not start mic'
+              );
             }
-            this.isListening = true;
-            try { this.recognition.start(); } catch {}
-            this.toggleBtn.setText('⏹ STOP VOICE');
-            this.toggleBtn.backgroundColor = '#ff4444';
-            this.transcription.addStatus('Listening…');
           }
         }
 
@@ -258,29 +316,21 @@
 
         async analyzeEnvironment() {
           if (this.isVisionProcessing) return;
-
           this.isVisionProcessing = true;
-          this.transcription.addStatus('Analyzing environment…');
-          this.visionBtn.backgroundColor = '#888888';
+          this.transcription.addStatus('Scanning scene…');
+          this.visionBtn.backgroundColor = '#888';
 
           try {
-            const base64Image = await xb.core.screenshotSynthesizer.getScreenshot();
-            if (!base64Image) throw new Error('Could not capture screenshot.');
-
-            const { strippedBase64, mimeType } = xb.parseBase64DataURL(base64Image);
-
-            const reply = await nvidiaChat([{
-              role: 'user',
-              content: [
-                { type: 'image_url', image_url: { url: `data:${mimeType};base64,${strippedBase64}` } },
-                { type: 'text', text: 'Describe what you see in this environment and tell me one interesting fact about it.' }
-              ]
-            }], VISION_MODEL);
-
-            this.transcription.addOutput(`[VISION] ${reply}\n`);
-            speak(reply);
+            const result = await detectScene();
+            this.transcription.addOutput(`[VISION] ${result}\n`);
+            speak(result);
           } catch (err) {
-            this._handleApiError(err, 'Vision');
+            this.transcription.addStatus(
+              err.message.includes('not ready')
+                ? 'Model loading, try again in a moment'
+                : 'Vision unavailable'
+            );
+            console.error(err);
           } finally {
             this.isVisionProcessing = false;
             this.visionBtn.backgroundColor = '#34a853';
@@ -288,25 +338,20 @@
         }
 
         _handleApiError(err, label) {
+          const s = String(err?.status ?? err?.message ?? '');
+          if (s.includes('503') || s.includes('UNAVAILABLE')) this.transcription.addStatus(`${label} busy — try again`);
+          else if (s.includes('429'))                          this.transcription.addStatus(`${label} rate limited`);
+          else                                                 this.transcription.addStatus(`${label} unavailable`);
           console.error(err);
-          const s = String(err?.status || err?.message || '');
-          if (s.includes('503') || s.includes('high demand') || s.includes('UNAVAILABLE')) {
-            this.transcription.addStatus(`${label} is busy — try again in a moment`);
-          } else if (s.includes('429') || s.includes('rate')) {
-            this.transcription.addStatus(`${label} rate limit — slow down a little`);
-          } else {
-            this.transcription.addStatus(`${label} unavailable`);
-          }
         }
       }
 
-      // ── Main 3D Scene ───────────────────────────────────────────────────────
+      // ── 3D Scene ────────────────────────────────────────────────────────────
       class MainScript extends xb.Script {
         init() {
           this.add(new THREE.HemisphereLight(0xffffff, 0x444444, 3));
           const dir = new THREE.DirectionalLight(0xffffff, 2);
-          dir.position.set(5, 5, 5);
-          this.add(dir);
+          dir.position.set(5, 5, 5); this.add(dir);
 
           const mat = new THREE.MeshPhongMaterial({ color: 0x00ccff, emissive: 0x002244, shininess: 100 });
           this.cube = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.4, 0.4), mat);
@@ -324,14 +369,14 @@
           this.cube.rotation.y += dt * 0.5;
           this.cube.rotation.z += dt * 0.3;
 
-          const isActive = this.aiManager.isAIRunning || this.aiManager.isVisionProcessing;
-          if (isActive) {
-            const speed = this.aiManager.isVisionProcessing ? 10 : 5;
-            this.cube.scale.setScalar(1.0 + Math.sin(this.time * speed) * 0.15);
-            const target = this.aiManager.isVisionProcessing ? new THREE.Color(0x34a853) : new THREE.Color(0xff00ff);
-            this.cube.material.color.lerp(target, 0.05);
+          const active = this.aiManager.isAIRunning || this.aiManager.isVisionProcessing;
+          if (active) {
+            const spd = this.aiManager.isVisionProcessing ? 10 : 5;
+            this.cube.scale.setScalar(1.0 + Math.sin(this.time * spd) * 0.15);
+            const col = this.aiManager.isVisionProcessing ? new THREE.Color(0x34a853) : new THREE.Color(0xff00ff);
+            this.cube.material.color.lerp(col, 0.05);
           } else {
-            this.cube.scale.lerp(new THREE.Vector3(1, 1, 1), 0.1);
+            this.cube.scale.lerp(new THREE.Vector3(1,1,1), 0.1);
             this.cube.material.color.lerp(new THREE.Color(0x00ccff), 0.05);
           }
         }
@@ -341,9 +386,8 @@
         const options = new xb.Options();
         options.enableUI();
         options.enableHands();
-        options.enableCamera('environment');
+        options.enableCamera('environment'); // passthrough for real-world vision
 
-        // Request mic so the browser grants permission before recognition starts
         try {
           const s = await navigator.mediaDevices.getUserMedia({ audio: true });
           s.getTracks().forEach(t => t.stop());
