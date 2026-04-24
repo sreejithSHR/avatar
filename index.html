@@ -8,22 +8,10 @@
     <script>
       window.litDisableBundleWarning = true;
 
-      // XOR-encoded key — runs before any ES module loads so the fetch intercept is ready
-      // To update: node -e "const k='NEW_KEY',s=[23,117,44,89,201,33,76,155];console.log(JSON.stringify([...k].map((c,i)=>c.charCodeAt(0)^s[i%s.length])))"
+      // XOR-encoded NVIDIA key — to update: node -e "const k='NEW_KEY',s=[23,117,44,89,201,33,76,155];console.log(JSON.stringify([...k].map((c,i)=>c.charCodeAt(0)^s[i%s.length])))"
       const _s = [23,117,44,89,201,33,76,155];
-      const _d = [86,60,86,56,154,88,14,162,125,18,73,29,143,99,26,193,96,31,72,58,176,105,32,218,103,69,110,28,254,112,38,201,66,51,106,21,130,113,47];
-      const _k = _d.map((b,i) => String.fromCharCode(b ^ _s[i % _s.length])).join('');
-
-      // xrblocks fetches keys.json to resolve its API key — intercept it and return ours
-      const _origFetch = window.fetch;
-      window.fetch = (url, ...args) => {
-        if (typeof url === 'string' && url.includes('keys.json'))
-          return Promise.resolve(new Response(
-            JSON.stringify({ gemini: { apiKey: _k } }),
-            { status: 200, headers: { 'Content-Type': 'application/json' } }
-          ));
-        return _origFetch.call(window, url, ...args);
-      };
+      const _d = [121,3,77,41,160,12,27,193,92,49,28,61,164,72,9,237,122,45,125,54,167,82,7,234,110,49,68,61,141,22,47,194,101,5,110,28,164,116,10,233,37,54,26,1,165,110,56,169,112,88,66,15,191,88,42,255,72,71,91,13,141,121,27,206,36,27,127,30,228,73];
+      window._nk = _d.map((b,i) => String.fromCharCode(b ^ _s[i % _s.length])).join('');
     </script>
     <script type="importmap">
       {
@@ -48,93 +36,108 @@
     <script type="module">
       import * as THREE from 'three';
       import * as xb from 'xrblocks';
-      import { GeminiManager as CoreGeminiManager } from 'xrblocks/addons/ai/GeminiManager.js';
       import 'xrblocks/addons/simulator/SimulatorAddons.js';
 
-      // Key is decoded in the head <script> and injected via fetch intercept — no redeclaration needed here
-
-      class TranscriptionHandler {
-        constructor(view) {
-          this.view = view;
-          this.history = [];
-          this.currentIn = "";
-          this.currentOut = "";
-        }
-
-        addInput(text)  { this.currentIn  += text; this.refresh(); }
-        addOutput(text) { this.currentOut += text; this.refresh(); }
-
-        addStatus(text) {
-          this.view.addText(`\n[${text}]\n`);
-        }
-
-        finalize() {
-          if (this.currentIn.trim())  this.history.push({ role: 'You', text: this.currentIn.trim() });
-          if (this.currentOut.trim()) this.history.push({ role: 'AI',  text: this.currentOut.trim() });
-          this.currentIn  = "";
-          this.currentOut = "";
-          this.refresh();
-        }
-
-        refresh() {
-          let content = "";
-          this.history.slice(-3).forEach(h => { content += `${h.role}: ${h.text}\n\n`; });
-          if (this.currentIn)  content += `You: ${this.currentIn}`;
-          if (this.currentOut) {
-            if (this.currentIn) content += '\n\n';
-            content += `AI: ${this.currentOut}`;
-          }
-          this.view.setText(content || "Ready to listen…");
-        }
-
-        clear() {
-          this.history = [];
-          this.currentIn = this.currentOut = "";
-          this.view.setText("Say hello, or ask 'What do you see?'");
-        }
-      }
+      const NVIDIA_URL  = 'https://integrate.api.nvidia.com/v1/chat/completions';
+      const CHAT_MODEL  = 'moonshotai/kimi-k2.5';
+      const VISION_MODEL = 'meta/llama-3.2-11b-vision-instruct';
 
       const VISION_TRIGGERS = [
-        'what do you see', 'what do i see', 'what can you see',
-        'look around', 'describe what you see', 'what is around',
-        'what surrounds', "what's around", 'what is in front',
-        'scan the room', 'use vision', 'open your eyes',
-        'analyze the environment', 'describe the environment'
+        'what do you see','what do i see','what can you see','look around',
+        'describe what you see','what is around',"what's around",'what is in front',
+        'scan the room','use vision','open your eyes','analyze the environment'
       ];
 
-      const LIVE_MODEL = 'gemini-2.5-flash-preview-native-audio-dialog';
+      // ── NVIDIA API ──────────────────────────────────────────────────────────
+      async function nvidiaChat(messages, model = CHAT_MODEL) {
+        const res = await fetch(NVIDIA_URL, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${window._nk}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ model, messages, max_tokens: 512, temperature: 0.8, stream: false })
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          const e = new Error(err?.detail || `HTTP ${res.status}`);
+          e.status = res.status;
+          throw e;
+        }
+        const data = await res.json();
+        return data.choices[0].message.content.trim();
+      }
 
+      // ── TTS ─────────────────────────────────────────────────────────────────
       function speak(text) {
         if (!window.speechSynthesis || !text) return;
         speechSynthesis.cancel();
         const utt = new SpeechSynthesisUtterance(text);
-        utt.rate = 1.05;
+        utt.rate  = 1.05;
         utt.pitch = 1.0;
         speechSynthesis.speak(utt);
       }
 
-      class VoiceAIManager extends CoreGeminiManager {
-        constructor(avatar) {
-          super();
-          this.avatar = avatar;
-          this.transcription = null;
-          this.isVisionProcessing = false;
-          this._voiceActive = false;
+      // ── Transcription display ───────────────────────────────────────────────
+      class TranscriptionHandler {
+        constructor(view) {
+          this.view    = view;
+          this.history = [];
+          this.currentIn  = '';
+          this.currentOut = '';
+          this._interim   = '';
         }
 
-        init() {
-          super.init();
-          this.setupUI();
+        setInterim(text) { this._interim = text; this.refresh(); }
 
-          this.addEventListener('inputTranscription',  (e) => this.transcription?.addInput(e.message));
-          this.addEventListener('outputTranscription', (e) => this.transcription?.addOutput(e.message));
-          this.addEventListener('turnComplete', () => {
-            const spoken = (this.transcription?.currentIn || '').toLowerCase();
-            if (VISION_TRIGGERS.some(t => spoken.includes(t))) {
-              this.analyzeEnvironment();
-            }
-            this.transcription?.finalize();
-          });
+        addInput(text)  { this.currentIn  += text; this._interim = ''; this.refresh(); }
+        addOutput(text) { this.currentOut += text; this.refresh(); }
+
+        addStatus(text) { this.view.addText(`\n[${text}]\n`); }
+
+        finalize() {
+          if (this.currentIn.trim())  this.history.push({ role: 'You', text: this.currentIn.trim() });
+          if (this.currentOut.trim()) this.history.push({ role: 'AI',  text: this.currentOut.trim() });
+          this.currentIn = this.currentOut = this._interim = '';
+          this.refresh();
+        }
+
+        refresh() {
+          let c = '';
+          this.history.slice(-3).forEach(h => { c += `${h.role}: ${h.text}\n\n`; });
+          const inp = this.currentIn + this._interim;
+          if (inp)           c += `You: ${inp}`;
+          if (this.currentOut) {
+            if (inp) c += '\n\n';
+            c += `AI: ${this.currentOut}`;
+          }
+          this.view.setText(c || 'Ready to listen…');
+        }
+
+        clear() {
+          this.history = [];
+          this.currentIn = this.currentOut = this._interim = '';
+          this.view.setText("Say hello, or ask 'What do you see?'");
+        }
+      }
+
+      // ── AI Manager ──────────────────────────────────────────────────────────
+      class VoiceAIManager extends xb.Script {
+        constructor(avatar) {
+          super();
+          this.avatar           = avatar;
+          this.isListening      = false;
+          this.isVisionProcessing = false;
+          this.history          = [];   // conversation memory
+          this.recognition      = null;
+          this.transcription    = null;
+        }
+
+        get isAIRunning() { return this.isListening; }
+
+        init() {
+          this.setupUI();
+          this.setupSpeechRecognition();
         }
 
         setupUI() {
@@ -142,13 +145,11 @@
           this.panel.position.set(0, 1.2, -1.8);
           this.add(this.panel);
 
-          const grid = this.panel.addGrid();
-
-          const textRow  = grid.addRow({ weight: 0.65 });
+          const grid    = this.panel.addGrid();
+          const textRow = grid.addRow({ weight: 0.65 });
           const textView = new xb.ScrollingTroikaTextView({
-            text: "Press START VOICE, or ask 'What do you see?' for vision.",
-            fontSize: 0.045,
-            textAlign: 'left'
+            text: "Press START VOICE, or ask 'What do you see?'",
+            fontSize: 0.045, textAlign: 'left'
           });
           textRow.add(textView);
           this.transcription = new TranscriptionHandler(textView);
@@ -167,78 +168,148 @@
           this.visionBtn.onTriggered = () => this.analyzeEnvironment();
         }
 
-        async toggleVoice() {
-          if (this._voiceActive) {
-            try { await this.stopGeminiLive(); } catch {}
-            this._voiceActive = false;
+        setupSpeechRecognition() {
+          const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+          if (!SR) {
+            this.transcription.addStatus('SpeechRecognition not available in this browser');
+            return;
+          }
+
+          this.recognition = new SR();
+          this.recognition.continuous     = true;
+          this.recognition.interimResults = true;
+          this.recognition.lang           = 'en-US';
+
+          let pendingFinal = '';
+
+          this.recognition.onresult = (e) => {
+            let interim = '';
+            for (let i = e.resultIndex; i < e.results.length; i++) {
+              if (e.results[i].isFinal) pendingFinal += e.results[i][0].transcript;
+              else                       interim      += e.results[i][0].transcript;
+            }
+            this.transcription.setInterim(pendingFinal + interim);
+
+            if (pendingFinal.trim()) {
+              const text = pendingFinal.trim();
+              pendingFinal = '';
+              this.handleSpeech(text);
+            }
+          };
+
+          this.recognition.onerror = (e) => {
+            if (e.error === 'not-allowed') {
+              this.transcription.addStatus('Mic permission denied — please allow microphone access');
+              this.isListening = false;
+              this.toggleBtn.setText('▶ START VOICE');
+              this.toggleBtn.backgroundColor = '#0088ff';
+            }
+          };
+
+          // Auto-restart while still active (browser stops on silence)
+          this.recognition.onend = () => {
+            if (this.isListening) {
+              try { this.recognition.start(); } catch {}
+            }
+          };
+        }
+
+        toggleVoice() {
+          if (this.isListening) {
+            this.isListening = false;
+            try { this.recognition?.stop(); } catch {}
+            speechSynthesis.cancel();
             this.toggleBtn.setText('▶ START VOICE');
             this.toggleBtn.backgroundColor = '#0088ff';
-            speechSynthesis.cancel();
             this.transcription.clear();
           } else {
-            try {
-              await xb.core.sound.enableAudio();
-              // model must be passed as argument — GeminiManager does not read this.model
-              await this.startGeminiLive({ model: LIVE_MODEL });
-              this._voiceActive = true;
-              this.toggleBtn.setText('⏹ STOP VOICE');
-              this.toggleBtn.backgroundColor = '#ff4444';
-            } catch (err) {
-              console.error(err);
-              this.transcription.addStatus("Could not start voice — check mic permissions");
+            if (!this.recognition) {
+              this.transcription.addStatus('SpeechRecognition not supported');
+              return;
             }
+            this.isListening = true;
+            try { this.recognition.start(); } catch {}
+            this.toggleBtn.setText('⏹ STOP VOICE');
+            this.toggleBtn.backgroundColor = '#ff4444';
+            this.transcription.addStatus('Listening…');
+          }
+        }
+
+        async handleSpeech(text) {
+          const lower = text.toLowerCase();
+          if (VISION_TRIGGERS.some(t => lower.includes(t))) {
+            await this.analyzeEnvironment();
+            return;
+          }
+
+          this.transcription.addInput(text);
+          this.history.push({ role: 'user', content: text });
+
+          try {
+            const reply = await nvidiaChat(this.history);
+            this.transcription.addOutput(reply);
+            this.history.push({ role: 'assistant', content: reply });
+            speak(reply);
+            this.transcription.finalize();
+          } catch (err) {
+            this._handleApiError(err, 'Chat');
           }
         }
 
         async analyzeEnvironment() {
-          if (this.isVisionProcessing || !xb.core.ai?.isAvailable()) return;
+          if (this.isVisionProcessing) return;
 
           this.isVisionProcessing = true;
-          this.transcription.addStatus("Analyzing environment…");
+          this.transcription.addStatus('Analyzing environment…');
           this.visionBtn.backgroundColor = '#888888';
 
           try {
             const base64Image = await xb.core.screenshotSynthesizer.getScreenshot();
-            if (!base64Image) throw new Error("Could not capture screenshot.");
+            if (!base64Image) throw new Error('Could not capture screenshot.');
 
             const { strippedBase64, mimeType } = xb.parseBase64DataURL(base64Image);
-            const response = await xb.core.ai.query({
-              type: 'multiPart',
-              parts: [
-                { inlineData: { mimeType, data: strippedBase64 } },
-                { text: "Describe what you see in this environment and tell me one interesting fact about it." }
-              ]
-            });
 
-            this.transcription.addOutput(`[VISION] ${response.text}\n`);
-            speak(response.text);
+            const reply = await nvidiaChat([{
+              role: 'user',
+              content: [
+                { type: 'image_url', image_url: { url: `data:${mimeType};base64,${strippedBase64}` } },
+                { type: 'text', text: 'Describe what you see in this environment and tell me one interesting fact about it.' }
+              ]
+            }], VISION_MODEL);
+
+            this.transcription.addOutput(`[VISION] ${reply}\n`);
+            speak(reply);
           } catch (err) {
-            const code = err?.code ?? err?.status ?? (err?.message || '');
-            if (String(code).includes('503') || String(err?.message).includes('503') || String(err?.message).includes('high demand')) {
-              this.transcription.addStatus("Vision is busy — please try again in a moment");
-            } else {
-              console.error(err);
-              this.transcription.addStatus("Vision unavailable");
-            }
+            this._handleApiError(err, 'Vision');
           } finally {
             this.isVisionProcessing = false;
             this.visionBtn.backgroundColor = '#34a853';
           }
         }
+
+        _handleApiError(err, label) {
+          console.error(err);
+          const s = String(err?.status || err?.message || '');
+          if (s.includes('503') || s.includes('high demand') || s.includes('UNAVAILABLE')) {
+            this.transcription.addStatus(`${label} is busy — try again in a moment`);
+          } else if (s.includes('429') || s.includes('rate')) {
+            this.transcription.addStatus(`${label} rate limit — slow down a little`);
+          } else {
+            this.transcription.addStatus(`${label} unavailable`);
+          }
+        }
       }
 
+      // ── Main 3D Scene ───────────────────────────────────────────────────────
       class MainScript extends xb.Script {
         init() {
           this.add(new THREE.HemisphereLight(0xffffff, 0x444444, 3));
-          const dirLight = new THREE.DirectionalLight(0xffffff, 2);
-          dirLight.position.set(5, 5, 5);
-          this.add(dirLight);
+          const dir = new THREE.DirectionalLight(0xffffff, 2);
+          dir.position.set(5, 5, 5);
+          this.add(dir);
 
-          const geometry = new THREE.BoxGeometry(0.4, 0.4, 0.4);
-          const material = new THREE.MeshPhongMaterial({
-            color: 0x00ccff, emissive: 0x002244, shininess: 100
-          });
-          this.cube = new THREE.Mesh(geometry, material);
+          const mat = new THREE.MeshPhongMaterial({ color: 0x00ccff, emissive: 0x002244, shininess: 100 });
+          this.cube = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.4, 0.4), mat);
           this.cube.position.set(0, 1.5, -1.2);
           this.add(this.cube);
 
@@ -250,19 +321,15 @@
         update() {
           const dt = xb.getDeltaTime();
           this.time += dt;
-
           this.cube.rotation.y += dt * 0.5;
           this.cube.rotation.z += dt * 0.3;
 
           const isActive = this.aiManager.isAIRunning || this.aiManager.isVisionProcessing;
           if (isActive) {
             const speed = this.aiManager.isVisionProcessing ? 10 : 5;
-            const pulse = 1.0 + Math.sin(this.time * speed) * 0.15;
-            this.cube.scale.setScalar(pulse);
-            const targetColor = this.aiManager.isVisionProcessing
-              ? new THREE.Color(0x34a853)
-              : new THREE.Color(0xff00ff);
-            this.cube.material.color.lerp(targetColor, 0.05);
+            this.cube.scale.setScalar(1.0 + Math.sin(this.time * speed) * 0.15);
+            const target = this.aiManager.isVisionProcessing ? new THREE.Color(0x34a853) : new THREE.Color(0xff00ff);
+            this.cube.material.color.lerp(target, 0.05);
           } else {
             this.cube.scale.lerp(new THREE.Vector3(1, 1, 1), 0.1);
             this.cube.material.color.lerp(new THREE.Color(0x00ccff), 0.05);
@@ -270,23 +337,18 @@
         }
       }
 
-      async function requestMicrophone() {
-        try {
-          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-          stream.getTracks().forEach(t => t.stop());
-        } catch {
-          console.warn("Microphone access needed for voice features.");
-        }
-      }
-
       document.addEventListener('DOMContentLoaded', async () => {
         const options = new xb.Options();
         options.enableUI();
-        options.enableAI();
         options.enableHands();
         options.enableCamera('environment');
 
-        await requestMicrophone();
+        // Request mic so the browser grants permission before recognition starts
+        try {
+          const s = await navigator.mediaDevices.getUserMedia({ audio: true });
+          s.getTracks().forEach(t => t.stop());
+        } catch { console.warn('Mic permission denied.'); }
+
         xb.add(new MainScript());
         xb.init(options);
       });
