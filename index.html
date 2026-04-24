@@ -73,7 +73,9 @@
         <h2>Gemini API Key</h2>
         <p>
           Your key is saved in <strong>your browser only</strong> (localStorage).<br>
-          It is never sent anywhere except directly to Google's Gemini API.
+          It is never sent anywhere except directly to Google's Gemini API.<br><br>
+          <strong>In VR?</strong> Open this URL on desktop first, or visit:<br>
+          <code style="font-size:0.78em;color:#7bf">yoursite.github.io/#key=YOURAPIKEY</code>
         </p>
         <input type="password" id="key-input" placeholder="Paste your Gemini API key…" autocomplete="off" />
         <div id="key-hint">Get a free key at aistudio.google.com</div>
@@ -91,12 +93,22 @@
       import 'xrblocks/addons/simulator/SimulatorAddons.js';
 
       // ── API key management ──────────────────────────────────────────────────
+      // VR tip: visit  yoursite.github.io/#key=YOURAPIKEY  once to auto-save.
+      // Hash fragments are never sent to the server (GitHub never sees the key).
       const LS_KEY = 'xr_gemini_key';
       const overlay  = document.getElementById('key-overlay');
       const keyInput = document.getElementById('key-input');
       const keyBtn   = document.getElementById('key-submit');
       const keyErr   = document.getElementById('key-error');
       const resetBtn = document.getElementById('key-reset');
+
+      // Check URL hash first: #key=YOURAPIKEY
+      const hashKey = new URLSearchParams(location.hash.slice(1)).get('key');
+      if (hashKey && hashKey.length >= 20) {
+        localStorage.setItem(LS_KEY, hashKey);
+        // Strip key from URL so it doesn't sit in browser history
+        history.replaceState(null, '', location.pathname + location.search);
+      }
 
       let APP_API_KEY = localStorage.getItem(LS_KEY) || '';
 
