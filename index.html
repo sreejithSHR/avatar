@@ -42,6 +42,23 @@
         z-index: 100;
       }
       #key-reset:hover { color: #fff; border-color: #446; }
+      #vr-url-box {
+        margin-top: 18px; background: #0a0d18; border: 1px solid #223;
+        border-radius: 7px; padding: 10px 12px;
+      }
+      #vr-url-label { font-size: 0.72em; color: #556; margin-bottom: 6px; }
+      #vr-url-link {
+        display: block; font-size: 0.72em; color: #7bbfff;
+        word-break: break-all; text-decoration: none; line-height: 1.5;
+      }
+      #vr-url-link:hover { color: #aaddff; text-decoration: underline; }
+      #vr-copy-btn {
+        margin-top: 8px; width: 100%; padding: 6px; background: #1a2a3a;
+        color: #7bbfff; border: 1px solid #334; border-radius: 5px;
+        font-size: 0.78em; cursor: pointer; transition: background 0.2s;
+      }
+      #vr-copy-btn:hover { background: #223344; }
+      #vr-copy-btn.copied { color: #4c4; border-color: #363; }
     </style>
     <script>
       window.litDisableBundleWarning = true;
@@ -73,14 +90,18 @@
         <h2>Gemini API Key</h2>
         <p>
           Your key is saved in <strong>your browser only</strong> (localStorage).<br>
-          It is never sent anywhere except directly to Google's Gemini API.<br><br>
-          <strong>In VR?</strong> Open this URL on desktop first, or visit:<br>
-          <code style="font-size:0.78em;color:#7bf">yoursite.github.io/#key=YOURAPIKEY</code>
+          It is never sent anywhere except directly to Google's Gemini API.
         </p>
         <input type="password" id="key-input" placeholder="Paste your Gemini API key…" autocomplete="off" />
         <div id="key-hint">Get a free key at aistudio.google.com</div>
         <button id="key-submit">Launch Experience</button>
         <div id="key-error">Please enter a valid API key.</div>
+
+        <div id="vr-url-box">
+          <div id="vr-url-label">In VR? Paste your key above, then copy this link and open it on your headset:</div>
+          <a id="vr-url-link" href="#" target="_blank">https://sreejithshr.github.io/avatar/#key=<em style="color:#556">paste your key first</em></a>
+          <button id="vr-copy-btn">Copy VR Link</button>
+        </div>
       </div>
     </div>
 
@@ -111,6 +132,35 @@
       }
 
       let APP_API_KEY = localStorage.getItem(LS_KEY) || '';
+
+      // VR link — updates live as the user types
+      const BASE_URL = 'https://sreejithshr.github.io/avatar/';
+      const vrLink   = document.getElementById('vr-url-link');
+      const vrCopy   = document.getElementById('vr-copy-btn');
+
+      function updateVrLink(key) {
+        if (key && key.length >= 20) {
+          const url = BASE_URL + '#key=' + key;
+          vrLink.href = url;
+          vrLink.textContent = url;
+        } else {
+          vrLink.href = '#';
+          vrLink.innerHTML = BASE_URL + '#key=<em style="color:#556">paste your key first</em>';
+        }
+      }
+      updateVrLink('');
+
+      keyInput.addEventListener('input', () => updateVrLink(keyInput.value.trim()));
+
+      vrCopy.addEventListener('click', () => {
+        const key = keyInput.value.trim();
+        if (key.length < 20) { keyErr.style.display = 'block'; return; }
+        navigator.clipboard.writeText(BASE_URL + '#key=' + key).then(() => {
+          vrCopy.textContent = 'Copied!';
+          vrCopy.classList.add('copied');
+          setTimeout(() => { vrCopy.textContent = 'Copy VR Link'; vrCopy.classList.remove('copied'); }, 2000);
+        });
+      });
 
       keyBtn.addEventListener('click', () => {
         const val = keyInput.value.trim();
