@@ -1,430 +1,434 @@
 <!doctype html>
 <html lang="en">
-<head>
-<title>MR AI Wrist Assistant</title>
-
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
-
-<link rel="stylesheet"
-href="https://xrblocks.github.io/css/xr.css" />
-
-<script>
-window.litDisableBundleWarning = true;
-
-const _s=[23,117,44,89,201,33,76,155];
-const _d=[121,3,77,41,160,12,27,193,92,49,28,61,164,72,9,237,122,45,125,54,167,82,7,234,110,49,68,61,141,22,47,194,101,5,110,28,164,116,10,233,37,54,26,1,165,110,56,169,112,88,66,15,191,88,42,255,72,71,91,13,141,121,27,206,36,27,127,30,228,73];
-
-window._nk=_d.map((b,i)=>String.fromCharCode(b^_s[i%_s.length])).join('');
-</script>
-
-
-<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
-
-
-<script type="importmap">
-{
-"imports": {
-"three":
-"https://cdn.jsdelivr.net/npm/three@0.182.0/build/three.module.js",
-
-"three/addons/":
-"https://cdn.jsdelivr.net/npm/three@0.182.0/examples/jsm/",
-
-"xrblocks":
-"https://cdn.jsdelivr.net/npm/xrblocks@0.11.0/build/xrblocks.js",
-
-"xrblocks/addons/":
-"https://cdn.jsdelivr.net/npm/xrblocks@0.11.0/build/addons/"
-}
-}
-</script>
-</head>
-
-
-<body>
-
-<script type="module">
-
-import * as THREE from "three";
-import * as xb from "xrblocks";
-import "xrblocks/addons/simulator/SimulatorAddons.js";
-
-
-const NVIDIA_URL="https://integrate.api.nvidia.com/v1/chat/completions";
-const WHISPER_URL="https://integrate.api.nvidia.com/v1/audio/transcriptions";
-
-const CHAT_MODEL="meta/llama-3.1-8b-instruct";
-
-
-async function nvidiaChat(messages){
-
-const res=await fetch(NVIDIA_URL,{
-method:"POST",
-headers:{
-Authorization:`Bearer ${window._nk}`,
-"Content-Type":"application/json"
-},
-body:JSON.stringify({
-model:CHAT_MODEL,
-messages,
-temperature:0.7,
-max_tokens:512
-})
-});
-
-return (await res.json())
-.choices[0]
-.message
-.content
-.trim();
-
-}
-
-
-
-function speak(text){
-
-if(!window.speechSynthesis)return;
-
-speechSynthesis.cancel();
-
-speechSynthesis.speak(
-new SpeechSynthesisUtterance(text)
-);
-
-}
-
-
-
-let cocoModel=null;
-
-async function preloadCoco(){
-
-if(window.cocoSsd && !cocoModel)
-cocoModel=await cocoSsd.load();
-
-}
-
-
-
-async function detectScene(){
-
-if(!cocoModel)
-await preloadCoco();
-
-const img=xb.core.renderer.domElement;
-
-const preds=await cocoModel.detect(img);
-
-if(!preds.length)
-return "I cannot detect objects.";
-
-return "I see "+
-preds.slice(0,5)
-.map(p=>p.class)
-.join(", ");
-
-}
-
-
-
-class WhisperSTT{
-
-constructor(callback){
-
-this.cb=callback;
-
-}
-
-
-async start(){
-
-await navigator.mediaDevices.getUserMedia({audio:true});
-
-this.stream=
-await navigator.mediaDevices.getUserMedia({audio:true});
-
-this.record();
-
-}
-
-
-record(){
-
-const rec=
-new MediaRecorder(this.stream);
-
-let chunks=[];
-
-rec.ondataavailable=e=>{
-
-chunks.push(e.data);
-
-};
-
-
-rec.onstop=async()=>{
-
-const blob=
-new Blob(chunks,{type:"audio/webm"});
-
-chunks=[];
-
-const fd=new FormData();
-
-fd.append("file",blob,"speech.webm");
-
-fd.append(
-"model",
-"openai/whisper-large-v3"
-);
-
-
-const res=
-await fetch(
-WHISPER_URL,
-{
-method:"POST",
-headers:{
-Authorization:
-`Bearer ${window._nk}`
-},
-body:fd
-}
-);
-
-const text=
-(await res.json()).text;
-
-if(text)
-this.cb(text);
-
-this.record();
-
-};
-
-
-rec.start();
-
-setTimeout(
-()=>rec.stop(),
-2500
-);
-
-}
-
-}
-
-
-
-class VoiceAIManager extends xb.Script{
-
-init(){
-
-this.setupUI();
-
-preloadCoco();
-
-}
-
-
-setupUI(){
-
-this.panel=
-new xb.SpatialPanel({
-width:.25,
-height:.23,
-backgroundColor:"#080c12",
-useBorderlessShader:true
-});
-
-this.add(this.panel);
-
-
-const grid=
-this.panel.addGrid();
-
-
-this.status=
-grid.addRow({weight:.15})
-.add(new xb.TextView({
-text:"⌚ READY",
-fontSize:.018
-}));
-
-
-this.textView=
-grid.addRow({weight:.6})
-.add(new xb.TextView({
-text:"Say hello",
-fontSize:.025
-}));
-
-
-this.button=
-grid.addRow({weight:.25})
-.add(new xb.TextButton({
-text:"▶ VOICE"
-}));
-
-
-this.button.onTriggered=
-()=>this.toggleVoice();
-
-}
-
-
-
-update(){
-
-if(!this.attached){
-
-const leftHand=
-xb.core?.user?.hands?.left
-?? xb.core?.user?.hands?.hands?.[0];
-
-if(leftHand){
-
-leftHand.add(this.panel);
-
-this.panel.position.set(
-0.02,
-0.05,
-0.02
-);
-
-this.panel.rotation.set(
--Math.PI/2,
-Math.PI/6,
-Math.PI/2
-);
-
-this.panel.scale.setScalar(.6);
-
-this.attached=true;
-
-}
-
-}
-
-}
-
-
-
-async toggleVoice(){
-
-if(this.listening){
-
-this.listening=false;
-
-this.button.setText("▶ VOICE");
-
-return;
-
-}
-
-
-this.listening=true;
-
-this.button.setText("⏹ STOP");
-
-
-this.stt=
-new WhisperSTT(
-t=>this.handleSpeech(t)
-);
-
-await this.stt.start();
-
-}
-
-
-
-async handleSpeech(text){
-
-this.textView.setText("You: "+text);
-
-const reply=
-await nvidiaChat([
-{
-role:"user",
-content:text
-}
-]);
-
-this.textView.setText(
-"You: "+text+
-"\nAI: "+reply
-);
-
-speak(reply);
-
-}
-
-}
-
-
-
-class MainScript extends xb.Script{
-
-init(){
-
-this.add(
-new THREE.HemisphereLight(
-0xffffff,
-0x444444,
-3
-)
-);
-
-
-const cube=
-new THREE.Mesh(
-new THREE.BoxGeometry(.4,.4,.4),
-new THREE.MeshPhongMaterial({
-color:0x00ccff
-})
-);
-
-cube.position.set(0,1.5,-1.2);
-
-this.add(cube);
-
-
-this.add(
-new VoiceAIManager()
-);
-
-}
-
-}
-
-
-
-document.addEventListener(
-"DOMContentLoaded",
-()=>{
-
-const options=
-new xb.Options();
-
-options.enableUI();
-
-options.enableHands();
-
-options.enableCamera("environment");
-
-
-xb.add(new MainScript());
-
-xb.init(options);
-
-}
-);
-
-</script>
-
-</body>
+  <head>
+    <title>Voice AI Cube | XR Blocks</title>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+    <link type="text/css" rel="stylesheet" href="https://xrblocks.github.io/css/xr.css" />
+
+    <script>
+      window.litDisableBundleWarning = true;
+      // XOR-encoded NVIDIA key
+      // To update: node -e "const k='NEW_KEY',s=[23,117,44,89,201,33,76,155];console.log(JSON.stringify([...k].map((c,i)=>c.charCodeAt(0)^s[i%s.length])))"
+      const _s = [23,117,44,89,201,33,76,155];
+      const _d = [121,3,77,41,160,12,27,193,92,49,28,61,164,72,9,237,122,45,125,54,167,82,7,234,110,49,68,61,141,22,47,194,101,5,110,28,164,116,10,233,37,54,26,1,165,110,56,169,112,88,66,15,191,88,42,255,72,71,91,13,141,121,27,206,36,27,127,30,228,73];
+      window._nk = _d.map((b,i) => String.fromCharCode(b ^ _s[i % _s.length])).join('');
+    </script>
+
+    <!-- TensorFlow.js + COCO-SSD for local object detection (no API call needed) -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
+
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.182.0/build/three.module.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.182.0/examples/jsm/",
+          "troika-three-text": "https://cdn.jsdelivr.net/gh/protectwise/troika@028b81cf308f0f22e5aa8e78196be56ec1997af5/packages/troika-three-text/src/index.js",
+          "troika-three-utils": "https://cdn.jsdelivr.net/gh/protectwise/troika@v0.52.4/packages/troika-three-utils/src/index.js",
+          "troika-worker-utils": "https://cdn.jsdelivr.net/gh/protectwise/troika@v0.52.4/packages/troika-worker-utils/src/index.js",
+          "bidi-js": "https://esm.sh/bidi-js@%5E1.0.2?target=es2022",
+          "webgl-sdf-generator": "https://esm.sh/webgl-sdf-generator@1.1.1/es2022/webgl-sdf-generator.mjs",
+          "lit": "https://cdn.jsdelivr.net/gh/lit/dist@3/core/lit-core.min.js",
+          "lit/": "https://esm.run/lit@3/",
+          "xrblocks": "https://cdn.jsdelivr.net/npm/xrblocks@0.11.0/build/xrblocks.js",
+          "xrblocks/addons/": "https://cdn.jsdelivr.net/npm/xrblocks@0.11.0/build/addons/",
+          "@google/genai": "https://cdn.jsdelivr.net/npm/@google/genai/+esm"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <script type="module">
+      import * as THREE from 'three';
+      import * as xb from 'xrblocks';
+      import 'xrblocks/addons/simulator/SimulatorAddons.js';
+
+      const NVIDIA_URL  = 'https://integrate.api.nvidia.com/v1/chat/completions';
+      const WHISPER_URL = 'https://integrate.api.nvidia.com/v1/audio/transcriptions';
+      const CHAT_MODEL  = 'moonshotai/kimi-k2.5';
+
+      const VISION_TRIGGERS = [
+        'what do you see','what do i see','what can you see','look around',
+        'describe what you see','what is around',"what's around",'what is in front',
+        'scan the room','use vision','open your eyes','analyze the environment'
+      ];
+
+      // ── NVIDIA chat ─────────────────────────────────────────────────────────
+      async function nvidiaChat(messages) {
+        const res = await fetch(NVIDIA_URL, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${window._nk}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model: CHAT_MODEL, messages, max_tokens: 512, temperature: 0.8, stream: false })
+        });
+        if (!res.ok) { const e = new Error(`HTTP ${res.status}`); e.status = res.status; throw e; }
+        return (await res.json()).choices[0].message.content.trim();
+      }
+
+      // ── TTS ─────────────────────────────────────────────────────────────────
+      function speak(text) {
+        if (!window.speechSynthesis || !text) return;
+        speechSynthesis.cancel();
+        const u = new SpeechSynthesisUtterance(text);
+        u.rate = 1.05; speechSynthesis.speak(u);
+      }
+
+      // ── COCO-SSD object detection (runs entirely in browser, no API) ────────
+      let _cocoModel = null;
+      async function preloadCoco() {
+        if (window.cocoSsd && !_cocoModel) _cocoModel = await window.cocoSsd.load();
+      }
+
+      async function detectScene() {
+        if (!_cocoModel) await preloadCoco();
+        if (!_cocoModel) throw new Error('COCO model not ready yet');
+
+        // Get scene as image via xrblocks screenshot (handles WebGL preserveDrawingBuffer safely)
+        let source;
+        if (xb.core.screenshotSynthesizer) {
+          const b64 = await xb.core.screenshotSynthesizer.getScreenshot();
+          source = await new Promise((res, rej) => {
+            const img = new Image(); img.onload = () => res(img); img.onerror = rej; img.src = b64;
+          });
+        } else {
+          source = xb.core.renderer?.domElement;
+        }
+        if (!source) throw new Error('No image source available');
+
+        const preds = await _cocoModel.detect(source);
+        if (!preds.length) return 'I don\'t detect any recognizable objects in the scene right now.';
+
+        const items = preds
+          .sort((a, b) => b.score - a.score)
+          .slice(0, 6)
+          .map(p => `${p.class} (${Math.round(p.score * 100)}%)`)
+          .join(', ');
+        return `I can see: ${items}.`;
+      }
+
+      // ── Whisper STT via NVIDIA (works on Quest — no browser Speech API needed) ──
+      class WhisperSTT {
+        constructor(onTranscript, onStatus) {
+          this.onTranscript = onTranscript;
+          this.onStatus     = onStatus;
+          this.isActive     = false;
+          this.stream       = null;
+        }
+
+        async start() {
+          this.stream   = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+          this.isActive = true;
+          this._record();
+        }
+
+        _record() {
+          if (!this.isActive || !this.stream) return;
+          const chunks = [];
+          const mime   = ['audio/webm;codecs=opus','audio/webm','audio/ogg']
+                           .find(m => MediaRecorder.isTypeSupported(m)) || '';
+          const rec    = new MediaRecorder(this.stream, mime ? { mimeType: mime } : {});
+
+          rec.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data); };
+          rec.onstop = async () => {
+            const blob = new Blob(chunks, { type: rec.mimeType || 'audio/webm' });
+            if (blob.size > 2500) await this._transcribe(blob);
+            this._record(); // immediately start next chunk
+          };
+
+          rec.start();
+          // Flush every 3 s — keeps latency acceptable without silence detection complexity
+          setTimeout(() => { try { if (rec.state === 'recording') rec.stop(); } catch {} }, 3000);
+        }
+
+        async _transcribe(blob) {
+          try {
+            const ext = blob.type.includes('ogg') ? 'ogg' : 'webm';
+            const fd  = new FormData();
+            fd.append('file',  blob, `speech.${ext}`);
+            fd.append('model', 'openai/whisper-large-v3');
+
+            const res = await fetch(WHISPER_URL, {
+              method: 'POST',
+              headers: { 'Authorization': `Bearer ${window._nk}` },
+              body: fd
+            });
+            if (!res.ok) return;
+            const text = (await res.json()).text?.trim();
+            if (text && text.length > 1) this.onTranscript(text);
+          } catch (err) {
+            console.error('Whisper STT:', err);
+          }
+        }
+
+        stop() {
+          this.isActive = false;
+          this.stream?.getTracks().forEach(t => t.stop());
+          this.stream = null;
+        }
+      }
+
+      // ── Transcription display ───────────────────────────────────────────────
+      class TranscriptionHandler {
+        constructor(view) {
+          this.view = view; this.history = [];
+          this.currentIn = ''; this.currentOut = ''; this._interim = '';
+        }
+        setInterim(t) { this._interim = t; this.refresh(); }
+        addInput(t)   { this.currentIn  += t; this._interim = ''; this.refresh(); }
+        addOutput(t)  { this.currentOut += t; this.refresh(); }
+        addStatus(t)  { this.view.addText(`\n[${t}]\n`); }
+        finalize() {
+          if (this.currentIn.trim())  this.history.push({ role: 'You', text: this.currentIn.trim() });
+          if (this.currentOut.trim()) this.history.push({ role: 'AI',  text: this.currentOut.trim() });
+          this.currentIn = this.currentOut = this._interim = '';
+          this.refresh();
+        }
+        refresh() {
+          let c = '';
+          this.history.slice(-3).forEach(h => { c += `${h.role}: ${h.text}\n\n`; });
+          const inp = this.currentIn + this._interim;
+          if (inp) c += `You: ${inp}`;
+          if (this.currentOut) { if (inp) c += '\n\n'; c += `AI: ${this.currentOut}`; }
+          this.view.setText(c || 'Ready…');
+        }
+        clear() {
+          this.history = []; this.currentIn = this.currentOut = this._interim = '';
+          this.view.setText("Say hello\nor ask 'What do you see?'");
+        }
+      }
+
+      // ── AI + Voice Manager ──────────────────────────────────────────────────
+      class VoiceAIManager extends xb.Script {
+        constructor(avatar) {
+          super();
+          this.avatar           = avatar;
+          this.isListening      = false;
+          this.isVisionProcessing = false;
+          this.history          = [];
+          this.stt              = null;
+          this.transcription    = null;
+          this._handAttached    = false;
+        }
+
+        get isAIRunning() { return this.isListening; }
+
+        init() {
+          this.setupUI();
+          preloadCoco(); // start loading model in background
+        }
+
+        update() {
+          // Attach panel to left hand once XR controllers are available
+          if (!this._handAttached) {
+            const leftCtrl = xb.core?.user?.controllers?.[0]
+                          ?? xb.core?.user?.hands?.hands?.[0];
+            if (leftCtrl && leftCtrl.children !== undefined) {
+              leftCtrl.add(this.panel);
+              // Back of hand: positive Y = dorsal side, slightly forward along knuckles
+              this.panel.position.set(0, 0.06, 0.01);
+              // Lie flat on back of hand (-90° X = face up) + 90° anticlockwise (Z) for watch orientation
+              this.panel.rotation.set(-Math.PI / 2, 0, Math.PI / 2);
+              this._handAttached = true;
+            }
+          }
+
+          // Blink status bar while listening
+          if (this.isListening) {
+            this._blinkT = (this._blinkT || 0) + xb.getDeltaTime();
+            const on = Math.floor(this._blinkT * 2) % 2 === 0;
+            this.statusView?.setText(on ? '● REC  —  LISTENING' : '○ REC  —  LISTENING');
+          }
+        }
+
+        setupUI() {
+          // Watch face — squircle shape via useBorderlessShader
+          this.panel = new xb.SpatialPanel({
+            width: 0.28, height: 0.26,
+            backgroundColor: '#07090f',
+            useBorderlessShader: true,
+            showEdge: true,
+            draggable: false
+          });
+          this.panel.position.set(0, 1.2, -0.5); // desktop fallback; overridden by update() in XR
+          this.add(this.panel);
+
+          const grid = this.panel.addGrid();
+
+          // ── Row 1: status bar ───────────────────────────────────────────
+          const statusRow  = grid.addRow({ weight: 0.13 });
+          this.statusView  = new xb.ScrollingTroikaTextView({
+            text: '⌚  AI WATCH  —  READY',
+            fontSize: 0.017,
+            textAlign: 'center'
+          });
+          statusRow.add(this.statusView);
+
+          // ── Row 2: scrolling conversation ───────────────────────────────
+          const textRow  = grid.addRow({ weight: 0.55 });
+          const textView = new xb.ScrollingTroikaTextView({
+            text: "Say hello\nor ask 'What do you see?'",
+            fontSize: 0.024,
+            textAlign: 'center'
+          });
+          textRow.add(textView);
+          this.transcription = new TranscriptionHandler(textView);
+
+          // ── Row 3: buttons ───────────────────────────────────────────────
+          const btnRow    = grid.addRow({ weight: 0.32 });
+          const voiceCol  = btnRow.addCol({ weight: 0.5 });
+          this.toggleBtn  = voiceCol.addTextButton({
+            text: '▶  VOICE', backgroundColor: '#0055cc', fontColor: '#fff', fontSize: 0.018
+          });
+          this.toggleBtn.onTriggered = () => this.toggleVoice();
+
+          const visionCol = btnRow.addCol({ weight: 0.5 });
+          this.visionBtn  = visionCol.addTextButton({
+            text: '👁  VISION', backgroundColor: '#155c2a', fontColor: '#fff', fontSize: 0.018
+          });
+          this.visionBtn.onTriggered = () => this.analyzeEnvironment();
+        }
+
+        async toggleVoice() {
+          if (this.isListening) {
+            this.isListening = false;
+            this._blinkT = 0;
+            this.stt?.stop();
+            this.stt = null;
+            speechSynthesis.cancel();
+            this.toggleBtn.setText('▶  VOICE');
+            this.toggleBtn.backgroundColor = '#0055cc';
+            this.statusView?.setText('⌚  AI WATCH  —  READY');
+            this.transcription.clear();
+          } else {
+            try {
+              this.stt = new WhisperSTT(
+                text => this.handleSpeech(text),
+                msg  => this.transcription.addStatus(msg)
+              );
+              await this.stt.start();
+              this.isListening = true;
+              this._blinkT = 0;
+              this.toggleBtn.setText('⏹  STOP');
+              this.toggleBtn.backgroundColor = '#cc2200';
+            } catch (err) {
+              this.statusView?.setText('⌚  AI WATCH  —  MIC ERROR');
+              this.transcription.addStatus(
+                err.name === 'NotAllowedError' ? 'Mic permission denied' : 'Could not start mic'
+              );
+            }
+          }
+        }
+
+        async handleSpeech(text) {
+          const lower = text.toLowerCase();
+          if (VISION_TRIGGERS.some(t => lower.includes(t))) {
+            await this.analyzeEnvironment();
+            return;
+          }
+
+          // Show user speech immediately in scroller
+          this.transcription.addInput(text);
+          this.history.push({ role: 'user', content: text });
+          this.statusView?.setText('⌛  THINKING…');
+
+          try {
+            const reply = await nvidiaChat(this.history);
+            this.history.push({ role: 'assistant', content: reply });
+            this.transcription.addOutput(reply);
+            speak(reply);
+            this.transcription.finalize();
+          } catch (err) {
+            this._handleApiError(err, 'Chat');
+          } finally {
+            if (this.isListening) this._blinkT = 0; // resume blink
+            else this.statusView?.setText('⌚  AI WATCH  —  READY');
+          }
+        }
+
+        async analyzeEnvironment() {
+          if (this.isVisionProcessing) return;
+          this.isVisionProcessing = true;
+          this.statusView?.setText('👁  SCANNING SCENE…');
+          this.visionBtn.backgroundColor = '#555';
+
+          try {
+            const result = await detectScene();
+            this.transcription.addOutput(`[VISION] ${result}\n`);
+            speak(result);
+          } catch (err) {
+            this.transcription.addStatus(
+              err.message.includes('not ready')
+                ? 'Model loading, try again in a moment'
+                : 'Vision unavailable'
+            );
+            console.error(err);
+          } finally {
+            this.isVisionProcessing = false;
+            this.visionBtn.backgroundColor = '#155c2a';
+            if (this.isListening) this._blinkT = 0;
+            else this.statusView?.setText('⌚  AI WATCH  —  READY');
+          }
+        }
+
+        _handleApiError(err, label) {
+          const s = String(err?.status ?? err?.message ?? '');
+          if (s.includes('503') || s.includes('UNAVAILABLE')) this.transcription.addStatus(`${label} busy — try again`);
+          else if (s.includes('429'))                          this.transcription.addStatus(`${label} rate limited`);
+          else                                                 this.transcription.addStatus(`${label} unavailable`);
+          console.error(err);
+        }
+      }
+
+      // ── 3D Scene ────────────────────────────────────────────────────────────
+      class MainScript extends xb.Script {
+        init() {
+          this.add(new THREE.HemisphereLight(0xffffff, 0x444444, 3));
+          const dir = new THREE.DirectionalLight(0xffffff, 2);
+          dir.position.set(5, 5, 5); this.add(dir);
+
+          const mat = new THREE.MeshPhongMaterial({ color: 0x00ccff, emissive: 0x002244, shininess: 100 });
+          this.cube = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.4, 0.4), mat);
+          this.cube.position.set(0, 1.5, -1.2);
+          this.add(this.cube);
+
+          this.aiManager = new VoiceAIManager(this.cube);
+          this.add(this.aiManager);
+          this.time = 0;
+        }
+
+        update() {
+          const dt = xb.getDeltaTime();
+          this.time += dt;
+          this.cube.rotation.y += dt * 0.5;
+          this.cube.rotation.z += dt * 0.3;
+
+          const active = this.aiManager.isAIRunning || this.aiManager.isVisionProcessing;
+          if (active) {
+            const spd = this.aiManager.isVisionProcessing ? 10 : 5;
+            this.cube.scale.setScalar(1.0 + Math.sin(this.time * spd) * 0.15);
+            const col = this.aiManager.isVisionProcessing ? new THREE.Color(0x34a853) : new THREE.Color(0xff00ff);
+            this.cube.material.color.lerp(col, 0.05);
+          } else {
+            this.cube.scale.lerp(new THREE.Vector3(1,1,1), 0.1);
+            this.cube.material.color.lerp(new THREE.Color(0x00ccff), 0.05);
+          }
+        }
+      }
+
+      document.addEventListener('DOMContentLoaded', () => {
+        const options = new xb.Options();
+        options.enableUI();
+        options.enableHands();
+        options.enableCamera('environment'); // passthrough for real-world vision
+
+        // Do NOT pre-request mic here — Quest browser silently denies any getUserMedia
+        // that isn't triggered by a direct user gesture (button press).
+        // The VOICE button press in toggleVoice() IS a user gesture, so it will
+        // trigger the permission dialog correctly on Quest.
+
+        xb.add(new MainScript());
+        xb.init(options);
+      });
+    </script>
+  </body>
 </html>
